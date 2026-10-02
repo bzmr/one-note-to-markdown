@@ -22,7 +22,7 @@ namespace OneNoteMarkdownExporter.Services
     /// This bypasses DLP/sensitivity label restrictions that block the Publish() method.
     /// Uses ReverseMarkdown for proper HTML-to-Markdown conversion.
     /// </summary>
-    public class OneNoteXmlToMarkdownConverter : IMarkdownContentConverter
+    public class OneNoteXmlToMarkdownConverter : IMarkdownContentConverter, IAssetExportStatisticsProvider
     {
         private readonly XNamespace _ns = "http://schemas.microsoft.com/office/onenote/2013/onenote";
         private readonly Converter _markdownConverter;
@@ -30,10 +30,36 @@ namespace OneNoteMarkdownExporter.Services
         private string _relativeAssetsPath = "";
         private string _pagePrefix = "";
         private int _imageCounter = 0;
+        private int _attachmentCounter = 0;
+        private readonly Dictionary<XElement, string> _attachmentHtmlCache = new();
+        private readonly HashSet<string> _exportedPrintoutIndexes = new(StringComparer.Ordinal);
+        private readonly HashSet<XElement> _processedImageElements = new();
         private string _literalAnglePlaceholderPrefix = "";
         private int _literalAnglePlaceholderCounter = 0;
         private readonly Dictionary<string, string> _literalAnglePlaceholders = new();
         private BinaryContentFetcher? _binaryContentFetcher;
+
+        public int SourceAttachments { get; private set; }
+        public int SuccessfulAttachmentExports { get; private set; }
+        public int FailedAttachmentExports { get; private set; }
+        public int SourceImages { get; private set; }
+        public int SuccessfulImageExports { get; private set; }
+        public int FailedImageExports { get; private set; }
+        public int SuppressedPrintoutImages { get; private set; }
+        public int UnprocessedImageObjects { get; private set; }
+        public int RecoveredImageOcrFallbacks { get; private set; }
+        public IReadOnlyList<string> UnprocessedImageDiagnostics => _unprocessedImageDiagnostics;
+        private readonly List<string> _unprocessedImageDiagnostics = new();
+        public IReadOnlyList<string> ImageFailureDiagnostics => _imageFailureDiagnostics;
+        private readonly List<string> _imageFailureDiagnostics = new();
+        public IReadOnlyList<string> AttachmentFailureDiagnostics => _attachmentFailureDiagnostics;
+        private readonly List<string> _attachmentFailureDiagnostics = new();
+
+        // Compatibility property: some intermediate ExportService versions exposed
+        // AttachmentPrintoutDiagnostics on IAssetExportStatisticsProvider.
+        // The temporary printout-mapping experiment is no longer used, so return
+        // an empty collection while remaining source-compatible with those builds.
+        public IReadOnlyList<string> AttachmentPrintoutDiagnostics => Array.Empty<string>();
 
         public OneNoteXmlToMarkdownConverter()
         {
@@ -53,13 +79,36 @@ namespace OneNoteMarkdownExporter.Services
             _relativeAssetsPath = relativeAssetsPath;
             _pagePrefix = SanitizePrefix(pagePrefix);
             _imageCounter = 0;
+            _attachmentCounter = 0;
+            _attachmentHtmlCache.Clear();
+            _exportedPrintoutIndexes.Clear();
+            _processedImageElements.Clear();
             _literalAnglePlaceholderPrefix = $"ONENOTELITERAL{Guid.NewGuid():N}";
             _literalAnglePlaceholderCounter = 0;
             _literalAnglePlaceholders.Clear();
             _binaryContentFetcher = binaryContentFetcher;
+            SourceAttachments = 0;
+            SuccessfulAttachmentExports = 0;
+            FailedAttachmentExports = 0;
+            SourceImages = 0;
+            SuccessfulImageExports = 0;
+            FailedImageExports = 0;
+            SuppressedPrintoutImages = 0;
+            UnprocessedImageObjects = 0;
+            RecoveredImageOcrFallbacks = 0;
+            _attachmentFailureDiagnostics.Clear();
+            _unprocessedImageDiagnostics.Clear();
+            _imageFailureDiagnostics.Clear();
 
             var doc = XDocument.Parse(pageXml);
             if (doc.Root == null) return "";
+
+            SourceAttachments = doc.Descendants(_ns + "InsertedFile").Count();
+            SourceImages = doc.Descendants(_ns + "Image").Count();
+
+            // Export original attachments first so printout images can be suppressed only
+            // when the corresponding original file was actually copied successfully.
+            PrepareInsertedFiles(doc);
 
             // Build HTML first, then convert to clean Markdown using ReverseMarkdown
             var htmlBuilder = new StringBuilder();
@@ -88,7 +137,45 @@ namespace OneNoteMarkdownExporter.Services
                 ProcessImage(image, htmlBuilder);
             }
 
+            // Process any inserted files directly on the page (outside outlines)
+            foreach (var insertedFile in doc.Root.Elements(_ns + "InsertedFile"))
+            {
+                ProcessInsertedFile(insertedFile, htmlBuilder);
+            }
+
             htmlBuilder.AppendLine("</body></html>");
+
+            // SourceImages counts every OneNote <Image> object in the page XML.
+            // Track how many of those objects the normal conversion traversal actually reached.
+            // Any remainder is reported explicitly instead of silently disappearing into the
+            // completeness arithmetic.
+            var allImageElements = doc.Descendants(_ns + "Image").ToList();
+            var unprocessedImages = allImageElements
+                .Where(image => !_processedImageElements.Contains(image))
+                .ToList();
+
+            UnprocessedImageObjects = unprocessedImages.Count;
+
+            foreach (var image in unprocessedImages)
+            {
+                var callbackId = image.Attribute("callbackID")?.Value ?? "none";
+                var diagnosticFormat = image.Attribute("format")?.Value ?? "none";
+                var isPrintOut = image.Attribute("isPrintOut")?.Value ?? "none";
+                var xpsFileIndex = image.Attribute("xpsFileIndex")?.Value ?? "none";
+                var parentName = image.Parent?.Name.LocalName ?? "none";
+                var grandParentName = image.Parent?.Parent?.Name.LocalName ?? "none";
+
+                var ancestorPath = string.Join(
+                    "/",
+                    image.AncestorsAndSelf()
+                        .Reverse()
+                        .Select(element => element.Name.LocalName));
+
+                _unprocessedImageDiagnostics.Add(
+                    $"callbackID='{callbackId}'; format='{diagnosticFormat}'; isPrintOut='{isPrintOut}'; " +
+                    $"xpsFileIndex='{xpsFileIndex}'; parent='{parentName}'; grandParent='{grandParentName}'; " +
+                    $"ancestorPath='{ancestorPath}'");
+            }
 
             // Get the HTML and normalize anchor tags BEFORE ReverseMarkdown processing
             var html = htmlBuilder.ToString();
@@ -215,14 +302,20 @@ namespace OneNoteMarkdownExporter.Services
             // Check for images
             if (oe.Elements(_ns + "Image").Any())
                 return true;
+
+            // Check for inserted files / attachments
+            if (oe.Elements(_ns + "InsertedFile").Any())
+                return true;
             
             // Check for tables
             if (oe.Elements(_ns + "Table").Any())
                 return true;
             
-            // Check nested children
-            var nestedChildren = oe.Element(_ns + "OEChildren");
-            if (nestedChildren != null && nestedChildren.Elements(_ns + "OE").Any())
+            // Check ALL nested OEChildren containers.
+            // Some OneNote pages contain more than one OEChildren element under the
+            // same OE. Using oe.Element(...) only inspects the first one and can hide
+            // otherwise valid images/attachments in later containers.
+            foreach (var nestedChildren in oe.Elements(_ns + "OEChildren"))
             {
                 foreach (var child in nestedChildren.Elements(_ns + "OE"))
                 {
@@ -261,6 +354,12 @@ namespace OneNoteMarkdownExporter.Services
                 content.Append(ProcessImageToHtml(image));
             }
 
+            // Process inserted files / attachments
+            foreach (var insertedFile in oe.Elements(_ns + "InsertedFile"))
+            {
+                content.Append(ProcessInsertedFileToHtml(insertedFile));
+            }
+
             var textContent = content.ToString();
             bool hasContent = !string.IsNullOrWhiteSpace(Regex.Replace(textContent, "<[^>]*>", "").Trim());
 
@@ -279,19 +378,14 @@ namespace OneNoteMarkdownExporter.Services
                 }
             }
 
-            // Process nested children
-            var nestedChildren = oe.Element(_ns + "OEChildren");
-            if (nestedChildren != null)
+            // Process ALL nested OEChildren containers.
+            // OneNote can emit multiple OEChildren siblings under one OE. The previous
+            // oe.Element(...) call only processed the first container, which is why
+            // valid images on pages such as "Fundraising und Engagement" could remain
+            // counted but unprocessed.
+            foreach (var nestedChildren in oe.Elements(_ns + "OEChildren"))
             {
-                if (isListItem || inList)
-                {
-                    // Nested content within list item
-                    ProcessOEChildren(nestedChildren, html);
-                }
-                else
-                {
-                    ProcessOEChildren(nestedChildren, html);
-                }
+                ProcessOEChildren(nestedChildren, html);
             }
 
             if ((hasContent || content.Length > 0) && (isListItem || inList))
@@ -473,8 +567,27 @@ namespace OneNoteMarkdownExporter.Services
 
         private string ProcessImageToHtml(XElement image)
         {
+            _processedImageElements.Add(image);
+
             try
             {
+                // OneNote printouts are page images generated from an inserted document.
+                // If the matching original document was exported successfully, keep only
+                // the original file and suppress these redundant printout images.
+                var isPrintOut = string.Equals(
+                    image.Attribute("isPrintOut")?.Value,
+                    "true",
+                    StringComparison.OrdinalIgnoreCase);
+                var xpsFileIndex = image.Attribute("xpsFileIndex")?.Value;
+
+                if (isPrintOut &&
+                    !string.IsNullOrWhiteSpace(xpsFileIndex) &&
+                    _exportedPrintoutIndexes.Contains(xpsFileIndex))
+                {
+                    SuppressedPrintoutImages++;
+                    return "";
+                }
+
                 string? base64Data = null;
                 
                 // First, try to get embedded data from the Data element
@@ -497,10 +610,67 @@ namespace OneNoteMarkdownExporter.Services
                 // If we still don't have data, return a placeholder
                 if (string.IsNullOrWhiteSpace(base64Data))
                 {
-                    // Log additional info for debugging
+                    FailedImageExports++;
+
                     var callbackId = image.Attribute("callbackID")?.Value;
                     var objectId = image.Attribute("objectID")?.Value;
+                    var diagnosticFormat = image.Attribute("format")?.Value ?? "none";
+                    var isPrintOutValue = image.Attribute("isPrintOut")?.Value ?? "none";
+                    var xpsFileIndexValue = image.Attribute("xpsFileIndex")?.Value ?? "none";
+                    var parentName = image.Parent?.Name.LocalName ?? "none";
+                    var ancestorPath = string.Join(
+                        "/",
+                        image.AncestorsAndSelf()
+                            .Reverse()
+                            .Select(element => element.Name.LocalName));
+
+                    // OneNote can retain OCR metadata even when the original image/printout
+                    // binary is no longer available. Record whether recoverable OCR text is
+                    // still present so we can distinguish "content completely lost" from
+                    // "visual lost, text potentially recoverable".
+                    var ocrDataElements = image.Elements(_ns + "OCRData").ToList();
+                    var ocrTextElements = image
+                        .Descendants(_ns + "OCRText")
+                        .Where(element => !string.IsNullOrWhiteSpace(element.Value))
+                        .ToList();
+
+                    var ocrText = string.Join(
+                        Environment.NewLine,
+                        ocrTextElements.Select(element => element.Value.Trim()));
+
+                    var ocrPreview = Regex.Replace(ocrText, @"\s+", " ").Trim();
+                    if (ocrPreview.Length > 240)
+                    {
+                        ocrPreview = ocrPreview.Substring(0, 240) + "...";
+                    }
+
+                    var ocrFallbackExported = !string.IsNullOrWhiteSpace(ocrText);
+                    if (ocrFallbackExported)
+                    {
+                        RecoveredImageOcrFallbacks++;
+                    }
+
+                    _imageFailureDiagnostics.Add(
+                        $"reason='no binary content'; callbackID='{callbackId ?? "none"}'; " +
+                        $"objectID='{objectId ?? "none"}'; format='{diagnosticFormat}'; isPrintOut='{isPrintOutValue}'; " +
+                        $"xpsFileIndex='{xpsFileIndexValue}'; parent='{parentName}'; ancestorPath='{ancestorPath}'; " +
+                        $"ocrDataElements={ocrDataElements.Count}; ocrTextElements={ocrTextElements.Count}; " +
+                        $"ocrTextLength={ocrText.Length}; ocrFallbackExported={ocrFallbackExported.ToString().ToLowerInvariant()}; " +
+                        $"ocrPreview='{ocrPreview.Replace("'", "''")}'");
+
                     var info = $"callbackID={callbackId ?? "none"}, objectID={objectId ?? "none"}";
+
+                    if (ocrFallbackExported)
+                    {
+                        var encodedOcrText = System.Net.WebUtility.HtmlEncode(ocrText);
+                        return
+                            $"<blockquote><p><strong>Archive note:</strong> " +
+                            $"The original OneNote image/printout is unavailable in the source notebook. " +
+                            $"OneNote OCR text was preserved as a fallback.</p></blockquote>" +
+                            $"<h4>Recovered OneNote OCR text</h4>" +
+                            $"<pre>{encodedOcrText}</pre>";
+                    }
+
                     return $"<p><em>[Image - no embedded data, could not fetch binary content. {System.Net.WebUtility.HtmlEncode(info)}]</em></p>";
                 }
                 
@@ -528,21 +698,350 @@ namespace OneNoteMarkdownExporter.Services
                 // Ensure assets folder exists
                 if (!Directory.Exists(_assetsFolder))
                 {
-                    Directory.CreateDirectory(_assetsFolder);
+                    ExecuteFileSystemWriteWithRetry(
+                        () => Directory.CreateDirectory(_assetsFolder),
+                        $"creating assets folder '{_assetsFolder}'");
                 }
 
                 // Decode and save
                 var imageBytes = System.Convert.FromBase64String(base64Data);
-                File.WriteAllBytes(filePath, imageBytes);
+                ExecuteFileSystemWriteWithRetry(
+                    () => File.WriteAllBytes(filePath, imageBytes),
+                    $"writing image '{filePath}'");
+                SuccessfulImageExports++;
 
                 // Return HTML img tag
                 var relativePath = $"{_relativeAssetsPath}/{fileName}".Replace("\\", "/");
                 return $"<p><img src=\"{relativePath}\" alt=\"image\" /></p>";
             }
+            catch (StorageWriteException)
+            {
+                // A confirmed transient-network failure that survived all retries is
+                // infrastructure failure, not a damaged OneNote image.
+                throw;
+            }
             catch (Exception ex)
             {
+                FailedImageExports++;
+
+                var callbackId = image.Attribute("callbackID")?.Value ?? "none";
+                var objectId = image.Attribute("objectID")?.Value ?? "none";
+                var diagnosticFormat = image.Attribute("format")?.Value ?? "none";
+                var isPrintOutValue = image.Attribute("isPrintOut")?.Value ?? "none";
+                var xpsFileIndexValue = image.Attribute("xpsFileIndex")?.Value ?? "none";
+                var parentName = image.Parent?.Name.LocalName ?? "none";
+                var ancestorPath = string.Join(
+                    "/",
+                    image.AncestorsAndSelf()
+                        .Reverse()
+                        .Select(element => element.Name.LocalName));
+
+                _imageFailureDiagnostics.Add(
+                    $"reason='exception'; exception='{ex.GetType().Name}: {ex.Message}'; " +
+                    $"callbackID='{callbackId}'; objectID='{objectId}'; format='{diagnosticFormat}'; " +
+                    $"isPrintOut='{isPrintOutValue}'; xpsFileIndex='{xpsFileIndexValue}'; " +
+                    $"parent='{parentName}'; ancestorPath='{ancestorPath}'");
+
                 return $"<p><em>[Image export failed: {System.Net.WebUtility.HtmlEncode(ex.Message)}]</em></p>";
             }
+        }
+
+
+        private static bool IsRetryableNetworkIOException(IOException ex)
+        {
+            var win32Error = ex.HResult & 0xFFFF;
+
+            return win32Error is
+                53
+                or 59
+                or 64
+                or 67
+                or 121
+                or 1201
+                or 1203
+                or 1231
+                or 1232
+                or 1236
+                or 1237
+                or 2250;
+        }
+
+        private static void ExecuteFileSystemWriteWithRetry(Action action, string operationDescription)
+        {
+            var delays = new[] { 1000, 3000 };
+
+            for (var attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    action();
+                    return;
+                }
+                catch (IOException ex) when (IsRetryableNetworkIOException(ex) && attempt < delays.Length)
+                {
+                    Thread.Sleep(delays[attempt]);
+                }
+                catch (IOException ex) when (IsRetryableNetworkIOException(ex))
+                {
+                    throw new StorageWriteException(
+                        $"Storage/network write failed after {delays.Length + 1} attempt(s) while {operationDescription}: {ex.Message}",
+                        ex);
+                }
+            }
+        }
+
+
+        private void ProcessInsertedFile(XElement insertedFile, StringBuilder html)
+        {
+            html.Append(ProcessInsertedFileToHtml(insertedFile));
+        }
+
+        /// <summary>
+        /// Pre-exports all inserted files on the page. This lets image processing know
+        /// whether a matching document printout is redundant before the image is rendered.
+        /// Printout images are suppressed only after the original file was copied successfully.
+        /// </summary>
+        private void PrepareInsertedFiles(XDocument doc)
+        {
+            foreach (var insertedFile in doc.Descendants(_ns + "InsertedFile"))
+            {
+                var (html, success) = ExportInsertedFileToHtml(insertedFile);
+                _attachmentHtmlCache[insertedFile] = html;
+
+                if (!success)
+                {
+                    continue;
+                }
+
+                var xpsFileIndex = insertedFile
+                    .Element(_ns + "Printout")
+                    ?.Attribute("xpsFileIndex")
+                    ?.Value;
+
+                if (!string.IsNullOrWhiteSpace(xpsFileIndex))
+                {
+                    _exportedPrintoutIndexes.Add(xpsFileIndex);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Returns the cached attachment link created during the pre-export pass.
+        /// Falls back to exporting on demand if called for an element that was not preprocessed.
+        /// </summary>
+        private string ProcessInsertedFileToHtml(XElement insertedFile)
+        {
+            if (_attachmentHtmlCache.TryGetValue(insertedFile, out var cachedHtml))
+            {
+                return cachedHtml;
+            }
+
+            var (html, success) = ExportInsertedFileToHtml(insertedFile);
+            _attachmentHtmlCache[insertedFile] = html;
+
+            if (success)
+            {
+                var xpsFileIndex = insertedFile
+                    .Element(_ns + "Printout")
+                    ?.Attribute("xpsFileIndex")
+                    ?.Value;
+
+                if (!string.IsNullOrWhiteSpace(xpsFileIndex))
+                {
+                    _exportedPrintoutIndexes.Add(xpsFileIndex);
+                }
+            }
+
+            return html;
+        }
+
+        /// <summary>
+        /// Exports an original file attached to a OneNote page (InsertedFile) into the
+        /// configured assets folder and returns the HTML link plus a success flag.
+        /// OneNote exposes the locally cached original via pathCache; pathSource is used
+        /// as a fallback when the cache path is unavailable.
+        /// </summary>
+        private (string Html, bool Success) ExportInsertedFileToHtml(XElement insertedFile)
+        {
+            try
+            {
+                var preferredName = insertedFile.Attribute("preferredName")?.Value;
+                var pathCache = insertedFile.Attribute("pathCache")?.Value;
+                var pathSource = insertedFile.Attribute("pathSource")?.Value;
+
+                var sourcePath = GetFirstExistingFile(pathCache, pathSource);
+                var displayName = !string.IsNullOrWhiteSpace(preferredName)
+                    ? Path.GetFileName(preferredName)
+                    : !string.IsNullOrWhiteSpace(sourcePath)
+                        ? Path.GetFileName(sourcePath)
+                        : "attachment";
+
+                if (string.IsNullOrWhiteSpace(sourcePath))
+                {
+                    FailedAttachmentExports++;
+
+                    var normalizedPathCache = NormalizeDiagnosticPath(pathCache);
+                    var normalizedPathSource = NormalizeDiagnosticPath(pathSource);
+                    var pathCacheExists = PathExistsForDiagnostic(normalizedPathCache);
+                    var pathSourceExists = PathExistsForDiagnostic(normalizedPathSource);
+
+                    _attachmentFailureDiagnostics.Add(
+                        $"preferredName='{preferredName ?? "none"}'; " +
+                        $"pathCache='{normalizedPathCache ?? "none"}'; pathCacheExists={pathCacheExists}; " +
+                        $"pathSource='{normalizedPathSource ?? "none"}'; pathSourceExists={pathSourceExists}");
+
+                    var details = $"preferredName={preferredName ?? "none"}, pathCache={pathCache ?? "none"}, pathSource={pathSource ?? "none"}";
+                    return ($"<p><strong>[ATTACHMENT EXPORT FAILED: original file not available locally. {System.Net.WebUtility.HtmlEncode(details)}]</strong></p>", false);
+                }
+
+                if (!Directory.Exists(_assetsFolder))
+                {
+                    ExecuteFileSystemWriteWithRetry(
+                        () => Directory.CreateDirectory(_assetsFolder),
+                        $"creating assets folder '{_assetsFolder}'");
+                }
+
+                _attachmentCounter++;
+                var fileName = GetSafeAttachmentFileName(displayName, _attachmentCounter);
+                var filePath = Path.Combine(_assetsFolder, fileName);
+
+                // OneNote cache files can carry the ReadOnly attribute. File.Copy
+                // preserves that attribute on the exported copy. On a later overwrite
+                // run, File.Copy(..., overwrite: true) then throws UnauthorizedAccessException
+                // if the existing target is still read-only. Clear ReadOnly on the exporter-
+                // owned target before and after copying. This never changes the OneNote source.
+                if (File.Exists(filePath))
+                {
+                    var existingAttributes = File.GetAttributes(filePath);
+                    if ((existingAttributes & FileAttributes.ReadOnly) != 0)
+                    {
+                        File.SetAttributes(filePath, existingAttributes & ~FileAttributes.ReadOnly);
+                    }
+                }
+
+                ExecuteFileSystemWriteWithRetry(
+                    () => File.Copy(sourcePath, filePath, true),
+                    $"copying attachment to '{filePath}'");
+
+                var copiedAttributes = File.GetAttributes(filePath);
+                if ((copiedAttributes & FileAttributes.ReadOnly) != 0)
+                {
+                    File.SetAttributes(filePath, copiedAttributes & ~FileAttributes.ReadOnly);
+                }
+
+                SuccessfulAttachmentExports++;
+
+                var relativePath = $"{_relativeAssetsPath}/{fileName}".Replace("\\", "/");
+                var encodedHref = System.Net.WebUtility.HtmlEncode(relativePath);
+                var encodedName = System.Net.WebUtility.HtmlEncode(displayName);
+                return ($"<p><a href=\"{encodedHref}\">{encodedName}</a></p>", true);
+            }
+            catch (StorageWriteException)
+            {
+                // Do not misclassify a confirmed NAS/SMB outage as a missing OneNote attachment.
+                throw;
+            }
+            catch (Exception ex)
+            {
+                FailedAttachmentExports++;
+                _attachmentFailureDiagnostics.Add($"exception='{ex.GetType().Name}: {ex.Message}'");
+                return ($"<p><strong>[ATTACHMENT EXPORT FAILED: {System.Net.WebUtility.HtmlEncode(ex.Message)}]</strong></p>", false);
+            }
+        }
+
+        private static string? NormalizeDiagnosticPath(string? candidatePath)
+        {
+            if (string.IsNullOrWhiteSpace(candidatePath))
+            {
+                return null;
+            }
+
+            try
+            {
+                return Environment.ExpandEnvironmentVariables(candidatePath.Trim().Trim('"'));
+            }
+            catch
+            {
+                return candidatePath;
+            }
+        }
+
+        private static bool PathExistsForDiagnostic(string? candidatePath)
+        {
+            if (string.IsNullOrWhiteSpace(candidatePath))
+            {
+                return false;
+            }
+
+            try
+            {
+                return File.Exists(candidatePath);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static string? GetFirstExistingFile(params string?[] candidatePaths)
+        {
+            foreach (var candidatePath in candidatePaths)
+            {
+                if (string.IsNullOrWhiteSpace(candidatePath))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    var expandedPath = Environment.ExpandEnvironmentVariables(candidatePath.Trim().Trim('"'));
+                    if (File.Exists(expandedPath))
+                    {
+                        return expandedPath;
+                    }
+                }
+                catch
+                {
+                    // Ignore malformed/unavailable candidates and try the next one.
+                }
+            }
+
+            return null;
+        }
+
+        private string GetSafeAttachmentFileName(string originalName, int attachmentIndex)
+        {
+            var originalExtension = Path.GetExtension(originalName);
+            var originalStem = Path.GetFileNameWithoutExtension(originalName);
+
+            var safeExtension = string.IsNullOrWhiteSpace(originalExtension)
+                ? string.Empty
+                : ExportPathSanitizer.SanitizeComponent(originalExtension, string.Empty, originalExtension);
+
+            // Sanitize the descriptive part while keeping the original extension.
+            var safeStem = ExportPathSanitizer
+                .SanitizeComponent(originalStem, "attachment", originalName)
+                .Replace(' ', '_');
+
+            var pageStem = string.IsNullOrWhiteSpace(_pagePrefix)
+                ? "page"
+                : _pagePrefix;
+
+            var baseStem = $"{pageStem}_attachment_{attachmentIndex:D4}_{safeStem}";
+
+            // Keep the complete path within the normal Win32 path budget used by the exporter.
+            var fullAssetsPath = Path.GetFullPath(_assetsFolder);
+            var availableFileNameLength = ExportPathSanitizer.MaxWin32PathLength - fullAssetsPath.Length - 1;
+            var extensionLength = safeExtension.Length;
+            var maxStemLength = Math.Max(1, availableFileNameLength - extensionLength);
+
+            if (baseStem.Length > maxStemLength)
+            {
+                baseStem = baseStem[..maxStemLength].TrimEnd(' ', '.');
+            }
+
+            var fileName = $"{baseStem}{safeExtension}";
+            return ExportPathSanitizer.SanitizeComponent(fileName, $"attachment_{attachmentIndex:D4}", originalName);
         }
 
         private string ProcessTable(XElement table)
@@ -573,24 +1072,70 @@ namespace OneNoteMarkdownExporter.Services
 
         private string GetCellContent(XElement cell)
         {
-            var oeChildren = cell.Element(_ns + "OEChildren");
-            if (oeChildren == null) return "";
+            // OneNote web clips can contain deeply nested wrapper structures inside a table
+            // cell (OEChildren/OE/.../Table/.../Cell/OEChildren/OE/Image). Walk the cell
+            // recursively and stop recursion at content elements that already know how to
+            // process their own descendants (especially Table). This avoids both missed
+            // images and duplicate exports.
+            return ProcessTableCellContainer(cell);
+        }
 
-            var parts = new List<string>();
-            foreach (var oe in oeChildren.Elements(_ns + "OE"))
+        private string ProcessTableCellContainer(XElement container)
+        {
+            var content = new StringBuilder();
+            var firstLogicalItem = true;
+
+            foreach (var child in container.Elements())
             {
-                var text = new StringBuilder();
-                foreach (var t in oe.Elements(_ns + "T"))
+                var childContent = ProcessTableCellNode(child);
+                if (string.IsNullOrWhiteSpace(childContent))
                 {
-                    text.Append(ProcessTextElement(t));
+                    continue;
                 }
-                if (text.Length > 0)
+
+                // OE elements normally represent separate logical lines/blocks in OneNote.
+                // Preserve a lightweight separator without affecting nested table markup.
+                if (!firstLogicalItem && child.Name == _ns + "OE")
                 {
-                    parts.Add(text.ToString());
+                    content.Append("<br/>");
                 }
+
+                content.Append(childContent);
+                firstLogicalItem = false;
             }
 
-            return string.Join("<br/>", parts);
+            return content.ToString();
+        }
+
+        private string ProcessTableCellNode(XElement element)
+        {
+            if (element.Name == _ns + "T")
+            {
+                return ProcessTextElement(element);
+            }
+
+            if (element.Name == _ns + "Image")
+            {
+                return ProcessImageToHtml(element);
+            }
+
+            if (element.Name == _ns + "InsertedFile")
+            {
+                return ProcessInsertedFileToHtml(element);
+            }
+
+            if (element.Name == _ns + "Table")
+            {
+                // ProcessTable handles its own rows/cells recursively via GetCellContent.
+                // Do not recurse into the table again here, otherwise assets would be
+                // exported twice.
+                return ProcessTable(element);
+            }
+
+            // OE, OEChildren and any other OneNote wrapper elements are transparent for
+            // table-cell export. Recurse through all child elements so future/older
+            // OneNote wrapper combinations do not require another special case.
+            return ProcessTableCellContainer(element);
         }
 
         private string GetPlainText(XElement? oe)
