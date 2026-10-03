@@ -9,10 +9,11 @@ using System.Globalization;
 
 namespace OneNoteMarkdownExporter.Services
 {
-    public class OneNoteService : IOneNoteExportSource, IOneNoteHyperlinkSource
+    public class OneNoteService : IOneNoteExportSource, IOneNoteHyperlinkSource, IDisposable
     {
-        private Microsoft.Office.Interop.OneNote.Application _oneNoteApp;
+        private Microsoft.Office.Interop.OneNote.Application? _oneNoteApp;
         private const string OneNoteNamespace = "http://schemas.microsoft.com/office/onenote/2013/onenote";
+        private bool _disposed;
 
         public OneNoteService()
         {
@@ -28,8 +29,9 @@ namespace OneNoteMarkdownExporter.Services
 
         public List<OneNoteItem> GetNotebookHierarchy()
         {
+            ThrowIfDisposed();
             string xml;
-            _oneNoteApp.GetHierarchy(null, HierarchyScope.hsPages, out xml);
+            _oneNoteApp!.GetHierarchy(null, HierarchyScope.hsPages, out xml);
 
             return ParseHierarchyXml(xml);
         }
@@ -168,7 +170,7 @@ namespace OneNoteMarkdownExporter.Services
         {
             try
             {
-                _oneNoteApp.SyncHierarchy(objectId);
+                _oneNoteApp!.SyncHierarchy(objectId);
             }
             catch
             {
@@ -184,7 +186,7 @@ namespace OneNoteMarkdownExporter.Services
         {
             try
             {
-                _oneNoteApp.NavigateTo(pageId, null, false);
+                _oneNoteApp!.NavigateTo(pageId, null, false);
                 // Give OneNote a moment to load the page
                 System.Threading.Thread.Sleep(500);
             }
@@ -203,13 +205,13 @@ namespace OneNoteMarkdownExporter.Services
                 System.IO.Directory.CreateDirectory(directory);
             }
 
-            _oneNoteApp.Publish(pageId, outputPath, PublishFormat.pfHTML, "");
+            _oneNoteApp!.Publish(pageId, outputPath, PublishFormat.pfHTML, "");
         }
 
         public string GetPageContent(string pageId)
         {
             string xml;
-            _oneNoteApp.GetPageContent(pageId, out xml, PageInfo.piAll);
+            _oneNoteApp!.GetPageContent(pageId, out xml, PageInfo.piAll);
             return xml;
         }
 
@@ -223,7 +225,7 @@ namespace OneNoteMarkdownExporter.Services
             try
             {
                 string hyperlink;
-                _oneNoteApp.GetHyperlinkToObject(hierarchyId, string.Empty, out hyperlink);
+                _oneNoteApp!.GetHyperlinkToObject(hierarchyId, string.Empty, out hyperlink);
                 return hyperlink;
             }
             catch (Exception)
@@ -245,7 +247,7 @@ namespace OneNoteMarkdownExporter.Services
             try
             {
                 string base64Content;
-                _oneNoteApp.GetBinaryPageContent(pageId, callbackId, out base64Content);
+                _oneNoteApp!.GetBinaryPageContent(pageId, callbackId, out base64Content);
                 return base64Content;
             }
             catch (Exception)
@@ -256,7 +258,7 @@ namespace OneNoteMarkdownExporter.Services
         
         public void UpdatePageContent(string xml)
         {
-            _oneNoteApp.UpdatePageContent(xml);
+            _oneNoteApp!.UpdatePageContent(xml);
         }
 
         public bool ExpandCollapsedParagraphs(string pageId)
@@ -264,7 +266,7 @@ namespace OneNoteMarkdownExporter.Services
             try
             {
                 string xml;
-                _oneNoteApp.GetPageContent(pageId, out xml, PageInfo.piAll);
+                _oneNoteApp!.GetPageContent(pageId, out xml, PageInfo.piAll);
 
                 var doc = XDocument.Parse(xml);
                 if (doc.Root == null) return false;
@@ -288,7 +290,7 @@ namespace OneNoteMarkdownExporter.Services
 
                 if (modified)
                 {
-                    _oneNoteApp.UpdatePageContent(doc.ToString());
+                    _oneNoteApp!.UpdatePageContent(doc.ToString());
                     return true;
                 }
                 return false;
@@ -297,6 +299,62 @@ namespace OneNoteMarkdownExporter.Services
             {
                 return false;
             }
+        }
+
+        /// <summary>
+        /// Disposes the COM object and releases resources.
+        /// </summary>
+        public void Dispose()
+        {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        /// <summary>
+        /// Throws ObjectDisposedException if the service has been disposed.
+        /// </summary>
+        private void ThrowIfDisposed()
+        {
+            if (_disposed)
+                throw new ObjectDisposedException(GetType().Name);
+        }
+
+        /// <summary>
+        /// Releases the OneNote COM object.
+        /// </summary>
+        protected virtual void Dispose(bool disposing)
+        {
+            if (_disposed)
+                return;
+
+            if (disposing)
+            {
+                if (_oneNoteApp != null)
+                {
+                    try
+                    {
+                        Marshal.ReleaseComObject(_oneNoteApp);
+                    }
+                    catch
+                    {
+                        // Ignore errors during COM cleanup
+                    }
+                    finally
+                    {
+                        _oneNoteApp = null;
+                    }
+                }
+            }
+
+            _disposed = true;
+        }
+
+        /// <summary>
+        /// Finalizer to ensure COM object is released even if Dispose is not called.
+        /// </summary>
+        ~OneNoteService()
+        {
+            Dispose(false);
         }
     }
 }

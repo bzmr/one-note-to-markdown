@@ -204,123 +204,124 @@ namespace OneNoteMarkdownExporter.Services
 
         private static async Task<int> ExecuteAsync(ExportOptions options, bool listMode, CancellationToken cancellationToken)
         {
-            var exportService = new ExportService();
-
-            // Console progress reporter
-            var progress = new Progress<ExportProgressUpdate>(update =>
+            using (var exportService = new ExportService())
             {
-                if (!options.Quiet || update.Kind == ExportProgressKind.PageFailed || update.Message.Contains("Error") || update.Message.Contains("failed"))
+                // Console progress reporter
+                var progress = new Progress<ExportProgressUpdate>(update =>
                 {
-                    Console.WriteLine(update.Message);
-                }
-            });
-
-            try
-            {
-                // List mode - just show hierarchy
-                if (listMode)
-                {
-                    return ListHierarchy(exportService, options.Verbose);
-                }
+                    if (!options.Quiet || update.Kind == ExportProgressKind.PageFailed || update.Message.Contains("Error") || update.Message.Contains("failed"))
+                    {
+                        Console.WriteLine(update.Message);
+                    }
+                });
 
                 try
                 {
-                    options.Validate();
+                    // List mode - just show hierarchy
+                    if (listMode)
+                    {
+                        return ListHierarchy(exportService, options.Verbose);
+                    }
+
+                    try
+                    {
+                        options.Validate();
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine($"Error: {ex.Message}");
+                        return 1;
+                    }
+
+                    // Validate that we have selection criteria
+                    if (!options.HasSelectionCriteria())
+                    {
+                        Console.Error.WriteLine("Error: No selection criteria specified.");
+                        Console.Error.WriteLine("Use --all, --notebook, --section, or --page to specify what to export.");
+                        Console.Error.WriteLine("Use --list to see available items.");
+                        Console.Error.WriteLine("Use --help for more information.");
+                        return 1;
+                    }
+
+                    // Report configuration
+                    if (!options.Quiet)
+                    {
+                        Console.WriteLine("OneNote to Markdown Exporter");
+                        Console.WriteLine("============================");
+                        Console.WriteLine($"Output directory: {options.OutputPath}");
+                        Console.WriteLine($"Asset organization: {FormatAssetOrganizationMode(options.AssetOrganizationMode)}");
+                        if (options.AssetOrganizationMode == AssetOrganizationMode.Centralized)
+                        {
+                            Console.WriteLine($"Assets directory: {AssetPathResolver.ResolveAssetsFolderPath(options.OutputPath, options.AssetsFolderPath)}");
+                        }
+                        else
+                        {
+                            Console.WriteLine("Assets directory: generated per selected organization mode");
+                        }
+                        Console.WriteLine($"Overwrite: {(options.Overwrite ? "Yes" : "No")}");
+                        var lintingStatus = !options.ApplyLinting
+                            ? "Disabled"
+                            : exportService.IsMarkdownCliLinterAvailable
+                                ? "Enabled (markdownlint-cli2)"
+                                : "Unavailable (export will continue without linting)";
+                        Console.WriteLine($"Linting: {lintingStatus}");
+                        Console.WriteLine($"Date preservation: {(options.PreserveDates ? "Enabled" : "Disabled")}");
+                        Console.WriteLine($"Date metadata: {FormatDateMetadataMode(options.DateMetadataMode)}");
+                        if (options.DryRun) Console.WriteLine("Mode: DRY RUN (no files will be created)");
+                        Console.WriteLine();
+                    }
+
+                    // Run export
+                    var result = await exportService.ExportAsync(options, progress, cancellationToken);
+
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        return 130; // Standard exit code for Ctrl+C
+                    }
+
+                    if (!string.IsNullOrEmpty(result.Error))
+                    {
+                        Console.Error.WriteLine($"Export error: {result.Error}");
+                        return 1;
+                    }
+
+                    // Summary
+                    if (!options.Quiet && !options.DryRun)
+                    {
+                        Console.WriteLine();
+                        Console.WriteLine("Export Summary:");
+                        Console.WriteLine($"  Pages exported: {result.ExportedPages}");
+                        if (result.FailedPages > 0)
+                        {
+                            Console.WriteLine($"  Pages failed: {result.FailedPages}");
+                        }
+                        if (result.Warnings.Count > 0)
+                        {
+                            Console.WriteLine($"  Warnings: {result.Warnings.Count}");
+                            foreach (var warning in result.Warnings)
+                            {
+                                Console.WriteLine($"  {warning}");
+                            }
+                        }
+                    }
+
+                    return result.FailedPages > 0 ? 1 : 0;
+                }
+                catch (System.Runtime.InteropServices.COMException ex)
+                {
+                    Console.Error.WriteLine($"OneNote COM error: {ex.Message}");
+                    Console.Error.WriteLine("Make sure OneNote is installed and not running in a protected mode.");
+                    return 2;
                 }
                 catch (Exception ex)
                 {
                     Console.Error.WriteLine($"Error: {ex.Message}");
+                    if (options.Verbose)
+                    {
+                        Console.Error.WriteLine(ex.StackTrace);
+                    }
                     return 1;
                 }
-
-                // Validate that we have selection criteria
-                if (!options.HasSelectionCriteria())
-                {
-                    Console.Error.WriteLine("Error: No selection criteria specified.");
-                    Console.Error.WriteLine("Use --all, --notebook, --section, or --page to specify what to export.");
-                    Console.Error.WriteLine("Use --list to see available items.");
-                    Console.Error.WriteLine("Use --help for more information.");
-                    return 1;
-                }
-
-                // Report configuration
-                if (!options.Quiet)
-                {
-                    Console.WriteLine("OneNote to Markdown Exporter");
-                    Console.WriteLine("============================");
-                    Console.WriteLine($"Output directory: {options.OutputPath}");
-                    Console.WriteLine($"Asset organization: {FormatAssetOrganizationMode(options.AssetOrganizationMode)}");
-                    if (options.AssetOrganizationMode == AssetOrganizationMode.Centralized)
-                    {
-                        Console.WriteLine($"Assets directory: {AssetPathResolver.ResolveAssetsFolderPath(options.OutputPath, options.AssetsFolderPath)}");
-                    }
-                    else
-                    {
-                        Console.WriteLine("Assets directory: generated per selected organization mode");
-                    }
-                    Console.WriteLine($"Overwrite: {(options.Overwrite ? "Yes" : "No")}");
-                    var lintingStatus = !options.ApplyLinting
-                        ? "Disabled"
-                        : exportService.IsMarkdownCliLinterAvailable
-                            ? "Enabled (markdownlint-cli2)"
-                            : "Unavailable (export will continue without linting)";
-                    Console.WriteLine($"Linting: {lintingStatus}");
-                    Console.WriteLine($"Date preservation: {(options.PreserveDates ? "Enabled" : "Disabled")}");
-                    Console.WriteLine($"Date metadata: {FormatDateMetadataMode(options.DateMetadataMode)}");
-                    if (options.DryRun) Console.WriteLine("Mode: DRY RUN (no files will be created)");
-                    Console.WriteLine();
-                }
-
-                // Run export
-                var result = await exportService.ExportAsync(options, progress, cancellationToken);
-
-                if (cancellationToken.IsCancellationRequested)
-                {
-                    return 130; // Standard exit code for Ctrl+C
-                }
-
-                if (!string.IsNullOrEmpty(result.Error))
-                {
-                    Console.Error.WriteLine($"Export error: {result.Error}");
-                    return 1;
-                }
-
-                // Summary
-                if (!options.Quiet && !options.DryRun)
-                {
-                    Console.WriteLine();
-                    Console.WriteLine("Export Summary:");
-                    Console.WriteLine($"  Pages exported: {result.ExportedPages}");
-                    if (result.FailedPages > 0)
-                    {
-                        Console.WriteLine($"  Pages failed: {result.FailedPages}");
-                    }
-                    if (result.Warnings.Count > 0)
-                    {
-                        Console.WriteLine($"  Warnings: {result.Warnings.Count}");
-                        foreach (var warning in result.Warnings)
-                        {
-                            Console.WriteLine($"  {warning}");
-                        }
-                    }
-                }
-
-                return result.FailedPages > 0 ? 1 : 0;
-            }
-            catch (System.Runtime.InteropServices.COMException ex)
-            {
-                Console.Error.WriteLine($"OneNote COM error: {ex.Message}");
-                Console.Error.WriteLine("Make sure OneNote is installed and not running in a protected mode.");
-                return 2;
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"Error: {ex.Message}");
-                if (options.Verbose)
-                {
-                    Console.Error.WriteLine(ex.StackTrace);
-                }
-                return 1;
             }
         }
 

@@ -92,12 +92,13 @@ namespace OneNoteMarkdownExporter.Services
     /// Service for exporting OneNote content to Markdown.
     /// This service is UI-independent and can be used by both GUI and CLI.
     /// </summary>
-    public class ExportService
+    public class ExportService : IDisposable
     {
         private readonly IOneNoteExportSource _oneNoteService;
         private readonly IMarkdownContentConverter _xmlConverter;
         private readonly IMarkdownLintService _cliLinter;
         private readonly IFileTimestampService _timestampService;
+        private bool _disposed;
         private readonly IYamlFrontMatterService _yamlFrontMatterService;
 
         // Persistent cache for the expensive OneNote COM conversion from a
@@ -1954,6 +1955,50 @@ namespace OneNoteMarkdownExporter.Services
                 ExportedPages = result?.ExportedPages ?? 0,
                 FailedPages = result?.FailedPages ?? 0
             });
+        }
+
+        /// <summary>
+        /// Disposes the service and releases resources, including the OneNote COM object.
+        /// </summary>
+        public void Dispose()
+        {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        /// <summary>
+        /// Releases managed and unmanaged resources.
+        /// </summary>
+        protected virtual void Dispose(bool disposing)
+        {
+            if (_disposed)
+                return;
+
+            if (disposing)
+            {
+                // Dispose the OneNote service if it implements IDisposable
+                if (_oneNoteService is IDisposable disposableOneNote)
+                {
+                    try
+                    {
+                        disposableOneNote.Dispose();
+                    }
+                    catch
+                    {
+                        // Ignore errors during OneNote service disposal
+                    }
+                }
+            }
+
+            _disposed = true;
+        }
+
+        /// <summary>
+        /// Finalizer to ensure resources are released even if Dispose is not called.
+        /// </summary>
+        ~ExportService()
+        {
+            Dispose(false);
         }
     }
 
