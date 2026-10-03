@@ -76,15 +76,19 @@ The application uses a **layered, service-oriented architecture**:
 
 ### Key Features
 1. **Dual Interface**: Same export engine for GUI and CLI
-2. **DLP-Safe Extraction**: Bypasses sensitivity label restrictions
-3. **Path Collision Handling**: Pre-computes collisions and appends stable hashes
-4. **Asset Organization**: Centralized, notebook-scoped, section-scoped, or page-scoped storage
-5. **Hyperlink Rewriting**: Converts OneNote links to relative Markdown links
-6. **Persistent Caching**: Hyperlink cache survives restarts for faster re-exports
-7. **Metadata Preservation**: Optional YAML front matter with creation/modification dates
-8. **Timestamp Preservation**: Sets file creation/modification times from OneNote data
-9. **Network Resilience**: Local logs written first; network archive failures non-fatal
-10. **Format Validation**: Optional markdownlint-cli2 integration for output cleanup
+2. **Unified Config System**: JSON-based config file for reproducible exports (GUI and CLI)
+3. **Selection Persistence**: Saves/restores notebook, section, and page selections between sessions
+4. **Bulk Selection**: "Select All Notebooks" checkbox for quick multi-notebook exports
+5. **DLP-Safe Extraction**: Bypasses sensitivity label restrictions
+6. **Path Collision Handling**: Pre-computes collisions and appends stable hashes
+7. **Asset Organization**: Centralized, notebook-scoped, section-scoped, or page-scoped storage
+8. **Hyperlink Rewriting**: Converts OneNote links to relative Markdown links
+9. **Persistent Caching**: Hyperlink cache survives restarts for faster re-exports
+10. **Metadata Preservation**: Optional YAML front matter with creation/modification dates
+11. **Timestamp Preservation**: Sets file creation/modification times from OneNote data
+12. **Table Pipe Escaping**: Handles pipe characters in table cells for valid Markdown output
+13. **Format Validation**: Optional markdownlint-cli2 integration for output cleanup
+14. **Network Resilience**: Local logs written first; network archive failures non-fatal
 
 ---
 
@@ -101,6 +105,7 @@ OneNoteMarkdownExporter/
 │  └─ OneNoteItem.cs                   [Hierarchy node model]
 ├─ Services/
 │  ├─ ExportService.cs                 [Main orchestrator]
+│  ├─ ExportConfigFile.cs              [Config model & persistence]
 │  ├─ OneNoteService.cs                [COM interop wrapper]
 │  ├─ OneNoteXmlToMarkdownConverter.cs  [Content converter]
 │  ├─ ExportPathPlanner.cs             [Path pre-computation]
@@ -137,22 +142,30 @@ OneNoteMarkdownExporter/
   - Loads OneNote hierarchy into WPF tree control
   - Manages user selection state (`IsSelected`, `IsExpanded` binding)
   - Provides export options UI (output path, asset organization, linting, etc.)
-  - Persists GUI state and user preferences to `settings.json`
+  - Loads/saves export configuration via `ExportConfigFileService`
   - Calls `ExportService.ExportSelectedAsync()` and tracks progress
 - **Key Features**:
   - Real-time progress reporting (pages exported/failed counts)
-  - Settings persistence via `%LOCALAPPDATA%\OneNoteMarkdownExporter\settings.json`
+  - Configuration persistence via `%LOCALAPPDATA%\OneNoteMarkdownExporter\export-config.json`
+  - Selection persistence: Saves and restores selected notebooks, sections, and pages
+  - "Select All Notebooks" checkbox for bulk selection convenience
   - Error dialog display for OneNote connection failures
   - Async/await pattern to keep UI responsive during export
+- **Configuration Lifecycle**:
+  - On load: `LoadExportConfig()` reads export config and applies saved selections to tree
+  - On save: `SaveExportConfigFromForm()` collects current tree selections and saves to config file
+  - Config includes all 16 export options plus selection criteria (NotebookNames, SectionPaths, PageIds)
 
 #### **OneNoteMarkdownExporter.csproj**
 - **Purpose**: Project configuration and build instructions
 - **Key Settings**:
   ```xml
+  <Version>1.0.0</Version>
   <TargetFramework>net10.0-windows</TargetFramework>
   <SelfContained>true</SelfContained>
   <PublishSingleFile>true</PublishSingleFile>
   ```
+- **Version Management**: Explicit `<Version>` property enables `--version` CLI flag; auto-incremented for releases
 - **Bundled Resources**: Commits `node.exe`, `markdownlint-cli2.mjs`, and default linting config to repo (copied to output on build)
 - **Build Validation**: Pre-build target ensures markdown linting runtime is present
 - **Deployment**: Publishes as single self-contained executable; no .NET installation required on target machine
@@ -172,6 +185,42 @@ OneNoteMarkdownExporter/
 ---
 
 ### Service Layer: Core Logic
+
+#### **ExportConfigFile.cs** (Configuration Persistence)
+- **Purpose**: Unified JSON config model for both GUI and CLI with automatic serialization
+- **Key Classes**:
+  ```csharp
+  public class ExportConfigFile
+  {
+      public int Version { get; set; } = 1;  // Schema version for future compatibility
+      public string? OutputPath { get; set; }
+      public string? AssetsFolderPath { get; set; }
+      public string? AssetOrganizationMode { get; set; }
+      public bool? Overwrite { get; set; }
+      public bool? ApplyLinting { get; set; }
+      public string? LintConfigPath { get; set; }
+      public bool? ExportAll { get; set; }
+      public List<string>? NotebookNames { get; set; }
+      public List<string>? SectionPaths { get; set; }
+      public List<string>? PageIds { get; set; }
+      public bool? DryRun { get; set; }
+      public bool? Verbose { get; set; }
+      public bool? Quiet { get; set; }
+      public bool? PreserveDates { get; set; }
+      public string? DateMetadataMode { get; set; }
+      public string? ListMode { get; set; }
+  }
+  ```
+- **Static Service Methods**:
+  - `GetDefaultConfigPath()`: Returns `%LOCALAPPDATA%/OneNoteMarkdownExporter/export-config.json`
+  - `Load(path)`: Deserializes JSON config file; returns empty config if file missing
+  - `TryLoad(path)`: Returns null if file doesn't exist
+  - `Save(path, config)`: Serializes to JSON with camelCase naming and enum-to-string conversion
+- **JSON Serialization**:
+  - Property naming: `camelCase` (e.g., `outputPath`, `assetOrganizationMode`)
+  - Enums: Converted to lowercase strings for readability
+  - Example config file: [docs/export-config.example.json](docs/export-config.example.json)
+- **Selection Persistence**: Stores notebook names, section paths, and page IDs for reproducible exports
 
 #### **ExportService.cs** (Orchestrator)
 - **Purpose**: Central coordinator for all export operations; UI-agnostic
@@ -273,6 +322,7 @@ OneNoteMarkdownExporter/
   - **Statistics Tracking**: Counts source/exported/failed images and attachments
   - **Diagnostic Logging**: Tracks unprocessed images (OCR fallbacks, printout suppression)
   - **Literal Angle Bracket Protection**: Escapes `<` and `>` to prevent Markdown misinterpretation
+  - **Table Pipe Escaping**: Escapes pipe characters (`|`) in table cells to `\|` to prevent "too many cells" Markdown parsing errors
   - **Collapsed Section Expansion**: Automatically expands collapsed OneNote paragraphs before processing
 - **Configuration**:
   ```csharp
@@ -361,6 +411,7 @@ OneNoteMarkdownExporter/
 - **Mode Detection**: Checks for known flags (--all, --notebook, --output, etc.)
 - **Supported Commands**:
   ```
+  --config <path>                Path to JSON export config file
   --all                          Export all notebooks
   --notebook <name> ...          Specific notebook(s)
   --section <path> ...           Section paths (Notebook/Section)
@@ -378,15 +429,24 @@ OneNoteMarkdownExporter/
   --verbose, -v                  Detailed output
   --quiet, -q                    Only errors
   --help, -h                     Show usage
+  --version                      Show application version
   ```
+- **Config File Integration**:
+  - `--config` flag loads options from JSON file
+  - `--config` without path argument uses default location: `%LOCALAPPDATA%/OneNoteMarkdownExporter/export-config.json`
+  - `--config /path/to/config.json` loads from specified path
+  - Explicit CLI arguments override config file values
+  - Proper boolean flag detection prevents `--all` from being ignored after config merge
 - **Flow**:
   1. Parse arguments
-  2. Build `ExportOptions` from parsed values
-  3. Validate selection and options
-  4. List mode: Print hierarchy and exit
-  5. Dry-run mode: Report what would be exported
-  6. Normal mode: Call `ExportService.ExportAsync()`
-  7. Print summary with exit code (0=success, 1=error, 130=Ctrl+C)
+  2. Load config file if `--config` specified (or use defaults)
+  3. Override config with explicit CLI arguments
+  4. Build `ExportOptions` from merged values
+  5. Validate selection and options
+  6. List mode: Print hierarchy and exit
+  7. Dry-run mode: Report what would be exported
+  8. Normal mode: Call `ExportService.ExportAsync()`
+  9. Print summary with exit code (0=success, 1=error, 130=Ctrl+C)
 
 #### **MarkdownLintCliService.cs** (Linting)
 - **Purpose**: Optional post-export formatting validation via markdownlint-cli2

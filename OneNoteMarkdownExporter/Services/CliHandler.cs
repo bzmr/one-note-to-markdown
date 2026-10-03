@@ -87,7 +87,8 @@ namespace OneNoteMarkdownExporter.Services
 
             var configOption = new Option<string?>("--config")
             {
-                Description = "Path to JSON export config file"
+                Description = "Path to JSON export config file (uses default location if no path provided)",
+                Arity = ArgumentArity.ZeroOrOne
             };
 
             var assetsFolderOption = new Option<string?>("--assets-folder")
@@ -168,8 +169,15 @@ namespace OneNoteMarkdownExporter.Services
 
             rootCommand.SetAction(async (result, cancellationToken) =>
             {
+                // Handle --config with optional path argument
                 var configPath = result.GetValue(configOption);
-                var hasConfigOption = result.GetResult(configOption)?.Tokens.Count > 0;
+                var hasConfigOption = IsOptionExplicit(result, configOption);
+                
+                // If --config flag is present without a path, use default location
+                if (hasConfigOption && string.IsNullOrWhiteSpace(configPath))
+                {
+                    configPath = ExportConfigFileService.GetDefaultConfigPath();
+                }
 
                 var assetOrganizationValue = result.GetValue(assetOrganizationOption);
                 if (!TryParseAssetOrganizationMode(assetOrganizationValue, out var assetOrganizationMode))
