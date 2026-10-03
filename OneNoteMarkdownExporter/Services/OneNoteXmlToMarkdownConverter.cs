@@ -1111,7 +1111,7 @@ namespace OneNoteMarkdownExporter.Services
         {
             if (element.Name == _ns + "T")
             {
-                return ProcessTextElement(element);
+                return ProcessTableTextElement(element);
             }
 
             if (element.Name == _ns + "Image")
@@ -1136,6 +1136,32 @@ namespace OneNoteMarkdownExporter.Services
             // table-cell export. Recurse through all child elements so future/older
             // OneNote wrapper combinations do not require another special case.
             return ProcessTableCellContainer(element);
+        }
+
+        private string ProcessTableTextElement(XElement t)
+        {
+            var html = ProcessTextElement(t);
+            if (string.IsNullOrEmpty(html))
+            {
+                return html;
+            }
+
+            var fragment = new HtmlAgilityPack.HtmlDocument();
+            fragment.LoadHtml(html);
+
+            foreach (var textNode in fragment.DocumentNode.Descendants().OfType<HtmlTextNode>().ToList())
+            {
+                var decodedText = HtmlEntity.DeEntitize(textNode.Text);
+                if (!decodedText.Contains('|'))
+                {
+                    continue;
+                }
+
+                var escapedText = decodedText.Replace("|", CreateLiteralAnglePlaceholder("PIPE", @"\|"), StringComparison.Ordinal);
+                textNode.Text = System.Net.WebUtility.HtmlEncode(escapedText);
+            }
+
+            return fragment.DocumentNode.InnerHtml;
         }
 
         private string GetPlainText(XElement? oe)

@@ -616,6 +616,34 @@ public class OneNoteXmlToMarkdownConverterTests
         result.Should().Contain("| Name | First line<br>Second line |");
     }
 
+    [Fact]
+    public void Convert_TableCellContainingPipe_EscapesPipeInCellValue()
+    {
+        var xml = @"<?xml version=""1.0""?>
+            <one:Page xmlns:one=""http://schemas.microsoft.com/office/onenote/2013/onenote"">
+                <one:Outline>
+                    <one:OEChildren>
+                        <one:OE>
+                            <one:Table>
+                                <one:Row>
+                                    <one:Cell><one:OEChildren><one:OE><one:T><![CDATA[Key]]></one:T></one:OE></one:OEChildren></one:Cell>
+                                    <one:Cell><one:OEChildren><one:OE><one:T><![CDATA[Value]]></one:T></one:OE></one:OEChildren></one:Cell>
+                                </one:Row>
+                                <one:Row>
+                                    <one:Cell><one:OEChildren><one:OE><one:T><![CDATA[Expression]]></one:T></one:OE></one:OEChildren></one:Cell>
+                                    <one:Cell><one:OEChildren><one:OE><one:T><![CDATA[A|B]]></one:T></one:OE></one:OEChildren></one:Cell>
+                                </one:Row>
+                            </one:Table>
+                        </one:OE>
+                    </one:OEChildren>
+                </one:Outline>
+            </one:Page>";
+
+        var result = _converter.Convert(xml, "", "assets", null, "test");
+
+        result.Should().Contain("| Expression | A\\|B |");
+    }
+
     #endregion
 
     #region Image Tests
