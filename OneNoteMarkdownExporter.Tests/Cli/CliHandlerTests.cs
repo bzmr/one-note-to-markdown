@@ -354,6 +354,19 @@ public class CliHandlerTests
         result.Should().BeTrue();
     }
 
+    [Fact]
+    public void ShouldRunCli_WithConfigFlag_ReturnsTrue()
+    {
+        // Arrange
+        var args = new[] { "--config", "config.json" };
+
+        // Act
+        var result = CliHandler.ShouldRunCli(args);
+
+        // Assert
+        result.Should().BeTrue();
+    }
+
     #endregion
 
     #region Case Sensitivity Tests

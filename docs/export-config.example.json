@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "outputPath": "C:\\temp\\export",
+  "assetsFolderPath": "C:\\temp\\export\\_assets",
+  "assetOrganizationMode": "centralized",
+  "overwrite": true,
+  "applyLinting": true,
+  "lintConfigPath": null,
+  "exportAll": true,
+  "notebookNames": [],
+  "sectionPaths": [],
+  "pageIds": [],
+  "dryRun": false,
+  "verbose": false,
+  "quiet": false,
+  "preserveDates": true,
+  "dateMetadataMode": "none",
+  "listMode": false
+}

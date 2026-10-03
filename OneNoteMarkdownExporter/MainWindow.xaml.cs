@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using System.Text.Json;
+using System.Linq;
 using System.Threading;
 using System.Windows;
 using System.Windows.Forms;
@@ -11,32 +11,14 @@ using OneNoteMarkdownExporter.Services;
 
 namespace OneNoteMarkdownExporter
 {
-    internal sealed class UiSettings
-    {
-        public int Version { get; set; } = 1;
-        public string? OutputPath { get; set; }
-        public string? AssetsFolderPath { get; set; }
-        public int? AssetOrganizationIndex { get; set; }
-        public bool? OverwriteExisting { get; set; }
-        public bool? ApplyMarkdownLinting { get; set; }
-        public bool? PreserveDates { get; set; }
-        public bool? AddYamlMetadata { get; set; }
-    }
-
     public partial class MainWindow : Window
     {
         private readonly ExportService _exportService;
         private CancellationTokenSource? _cts;
         private const string NoFailuresMessage = "No failures.";
-        private const string SettingsFolderName = "OneNoteMarkdownExporter";
-        private const string SettingsFileName = "settings.json";
         private int _failureLogCount;
-
-        private static string SettingsFilePath =>
-            Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                SettingsFolderName,
-                SettingsFileName);
+        private ExportConfigFile? _loadedConfig;
+        private bool _isUpdatingSelectAll;
 
         public MainWindow()
         {
@@ -47,27 +29,22 @@ namespace OneNoteMarkdownExporter
             OneNoteItem.SelectionChanged += OnSelectionChanged;
 
             SetDefaultOutputPath();
-            LoadUiSettings();
+            LoadExportConfig();
             UpdateAssetOrganizationUi();
-
-            Closing += (_, _) => SaveUiSettings();
         }
 
-        private void LoadUiSettings()
+        private void LoadExportConfig()
         {
             try
             {
-                if (!File.Exists(SettingsFilePath))
+                var configPath = ExportConfigFileService.GetDefaultConfigPath();
+                if (!File.Exists(configPath))
                 {
                     return;
                 }
 
-                var json = File.ReadAllText(SettingsFilePath);
-                var settings = JsonSerializer.Deserialize<UiSettings>(json);
-                if (settings == null)
-                {
-                    return;
-                }
+                var settings = ExportConfigFileService.Load(configPath);
+                _loadedConfig = settings;
 
                 if (!string.IsNullOrWhiteSpace(settings.OutputPath))
                 {
@@ -83,72 +60,33 @@ namespace OneNoteMarkdownExporter
                     AssetsPathBox.Text = AssetPathResolver.GetDefaultAssetsFolderPath(OutputPathBox.Text);
                 }
 
-                if (settings.AssetOrganizationIndex.HasValue
-                    && settings.AssetOrganizationIndex.Value >= 0
-                    && settings.AssetOrganizationIndex.Value <= 3)
+                AssetOrganizationBox.SelectedIndex = settings.AssetOrganizationMode switch
                 {
-                    AssetOrganizationBox.SelectedIndex = settings.AssetOrganizationIndex.Value;
-                }
+                    AssetOrganizationMode.Notebook => 1,
+                    AssetOrganizationMode.Section => 2,
+                    AssetOrganizationMode.Page => 3,
+                    _ => 0
+                };
 
-                if (settings.OverwriteExisting.HasValue)
-                {
-                    OverwriteExistingBox.IsChecked = settings.OverwriteExisting.Value;
-                }
+                OverwriteExistingBox.IsChecked = settings.Overwrite;
+                LintMarkdownBox.IsChecked = settings.ApplyLinting;
+                PreserveDatesBox.IsChecked = settings.PreserveDates;
+                YamlMetadataBox.IsChecked = settings.DateMetadataMode == DateMetadataMode.Yaml;
 
-                if (settings.ApplyMarkdownLinting.HasValue)
-                {
-                    LintMarkdownBox.IsChecked = settings.ApplyMarkdownLinting.Value;
-                }
-
-                if (settings.PreserveDates.HasValue)
-                {
-                    PreserveDatesBox.IsChecked = settings.PreserveDates.Value;
-                }
-
-                if (settings.AddYamlMetadata.HasValue)
-                {
-                    YamlMetadataBox.IsChecked = settings.AddYamlMetadata.Value;
-                }
-
-                Log($"Loaded UI settings from: {SettingsFilePath}");
+                Log($"Loaded export config from: {configPath}");
             }
             catch (Exception ex)
             {
-                Log($"Could not load UI settings; using defaults: {ex.Message}");
+                Log($"Could not load export config; using defaults: {ex.Message}");
             }
         }
 
-        private void SaveUiSettings()
+        private void SaveExportConfigFromForm()
         {
-            try
-            {
-                var settingsDirectory = Path.GetDirectoryName(SettingsFilePath);
-                if (!string.IsNullOrWhiteSpace(settingsDirectory))
-                {
-                    Directory.CreateDirectory(settingsDirectory);
-                }
-
-                var settings = new UiSettings
-                {
-                    OutputPath = OutputPathBox.Text,
-                    AssetsFolderPath = AssetsPathBox.Text,
-                    AssetOrganizationIndex = AssetOrganizationBox.SelectedIndex,
-                    OverwriteExisting = OverwriteExistingBox.IsChecked == true,
-                    ApplyMarkdownLinting = LintMarkdownBox.IsChecked == true,
-                    PreserveDates = PreserveDatesBox.IsChecked == true,
-                    AddYamlMetadata = YamlMetadataBox.IsChecked == true
-                };
-
-                var json = JsonSerializer.Serialize(
-                    settings,
-                    new JsonSerializerOptions { WriteIndented = true });
-
-                File.WriteAllText(SettingsFilePath, json);
-            }
-            catch (Exception ex)
-            {
-                Log($"Could not save UI settings: {ex.Message}");
-            }
+            var options = BuildExportOptionsFromForm();
+            var config = ExportConfigFile.FromExportOptions(options, listMode: false);
+            ApplySelectionCriteriaToConfig(config);
+            ExportConfigFileService.Save(config);
         }
 
         private void SetDefaultOutputPath()
@@ -190,6 +128,8 @@ namespace OneNoteMarkdownExporter
             var items = NotebookTree.ItemsSource as List<OneNoteItem>;
             var selectedCount = items != null ? CountSelectedItems(items) : 0;
 
+            UpdateSelectAllCheckboxState(items);
+
             if (selectedCount > 0)
             {
                 SelectionStatusBorder.Background = new System.Windows.Media.SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#D4EDDA"));
@@ -206,6 +146,58 @@ namespace OneNoteMarkdownExporter
                 SelectionStatusText.Text = "Select notebooks, sections, or pages from the tree to export";
                 ExportButton.IsEnabled = false;
             }
+        }
+
+        private void UpdateSelectAllCheckboxState(List<OneNoteItem>? items)
+        {
+            if (SelectAllNotebooksBox == null)
+            {
+                return;
+            }
+
+            _isUpdatingSelectAll = true;
+            try
+            {
+                if (items == null || items.Count == 0)
+                {
+                    SelectAllNotebooksBox.IsChecked = false;
+                    return;
+                }
+
+                var rootNotebooks = items.Where(item => item.Type == OneNoteItemType.Notebook).ToList();
+                SelectAllNotebooksBox.IsChecked = rootNotebooks.Count > 0 && rootNotebooks.All(item => item.IsSelected);
+            }
+            finally
+            {
+                _isUpdatingSelectAll = false;
+            }
+        }
+
+        private void SelectAllNotebooksBox_Checked(object sender, RoutedEventArgs e)
+        {
+            ApplySelectAllState(true);
+        }
+
+        private void SelectAllNotebooksBox_Unchecked(object sender, RoutedEventArgs e)
+        {
+            ApplySelectAllState(false);
+        }
+
+        private void ApplySelectAllState(bool selected)
+        {
+            if (_isUpdatingSelectAll)
+            {
+                return;
+            }
+
+            var items = NotebookTree.ItemsSource as List<OneNoteItem>;
+            if (items == null)
+            {
+                return;
+            }
+
+            SetSelectionRecursive(items, selected);
+            UpdateSelectionStatus();
         }
 
         private int CountSelectedItems(List<OneNoteItem> items)
@@ -231,6 +223,12 @@ namespace OneNoteMarkdownExporter
             {
                 var items = _exportService.GetNotebookHierarchy();
                 NotebookTree.ItemsSource = items;
+
+                if (_loadedConfig != null)
+                {
+                    ApplyConfigSelectionToTree(items, _loadedConfig);
+                }
+
                 Log("Notebooks loaded successfully.");
                 UpdateSelectionStatus();
             }
@@ -261,7 +259,6 @@ namespace OneNoteMarkdownExporter
                     }
 
                     UpdateAssetOrganizationUi();
-                    SaveUiSettings();
                 }
             }
         }
@@ -319,7 +316,6 @@ namespace OneNoteMarkdownExporter
                 if (dialog.ShowDialog() == System.Windows.Forms.DialogResult.OK)
                 {
                     AssetsPathBox.Text = dialog.SelectedPath;
-                    SaveUiSettings();
                 }
             }
         }
@@ -358,25 +354,11 @@ namespace OneNoteMarkdownExporter
             SetExportStatus($"Exported 0 of {totalPages} pages...", "#0C5460");
             Log("Starting export...");
 
-            var options = new ExportOptions
-            {
-                OutputPath = rootPath,
-                AssetOrganizationMode = GetSelectedAssetOrganizationMode(),
-                Overwrite = OverwriteExistingBox.IsChecked == true,
-                ApplyLinting = LintMarkdownBox.IsChecked == true,
-                PreserveDates = PreserveDatesBox.IsChecked == true,
-                DateMetadataMode = YamlMetadataBox.IsChecked == true ? DateMetadataMode.Yaml : DateMetadataMode.None
-            };
-
-            if (options.AssetOrganizationMode == AssetOrganizationMode.Centralized)
-            {
-                options.AssetsFolderPath = AssetsPathBox.Text;
-            }
+            var options = BuildExportOptionsFromForm();
 
             try
             {
                 options.Validate();
-                SaveUiSettings();
             }
             catch (Exception ex)
             {
@@ -497,6 +479,208 @@ namespace OneNoteMarkdownExporter
 
             UpdateSelectionStatus();
             _cts = null;
+        }
+
+        private ExportOptions BuildExportOptionsFromForm()
+        {
+            var options = new ExportOptions
+            {
+                OutputPath = OutputPathBox.Text,
+                AssetOrganizationMode = GetSelectedAssetOrganizationMode(),
+                Overwrite = OverwriteExistingBox.IsChecked == true,
+                ApplyLinting = LintMarkdownBox.IsChecked == true,
+                PreserveDates = PreserveDatesBox.IsChecked == true,
+                DateMetadataMode = YamlMetadataBox.IsChecked == true ? DateMetadataMode.Yaml : DateMetadataMode.None
+            };
+
+            if (options.AssetOrganizationMode == AssetOrganizationMode.Centralized)
+            {
+                options.AssetsFolderPath = AssetsPathBox.Text;
+            }
+
+            return options;
+        }
+
+        private void ApplySelectionCriteriaToConfig(ExportConfigFile config)
+        {
+            var items = NotebookTree.ItemsSource as List<OneNoteItem>;
+            if (items == null)
+            {
+                config.ExportAll = false;
+                config.NotebookNames = null;
+                config.SectionPaths = null;
+                config.PageIds = null;
+                return;
+            }
+
+            var selectedNotebooks = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var selectedSectionPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var selectedPageIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            CollectSelectedCriteria(items, null, new List<string>(), selectedNotebooks, selectedSectionPaths, selectedPageIds);
+
+            var rootNotebooks = items.Where(item => item.Type == OneNoteItemType.Notebook).ToList();
+            var allRootNotebooksSelected = rootNotebooks.Count > 0 && rootNotebooks.All(notebook => notebook.IsSelected);
+
+            config.ExportAll = allRootNotebooksSelected;
+            config.NotebookNames = selectedNotebooks.Count > 0 ? selectedNotebooks.OrderBy(name => name).ToList() : null;
+            config.SectionPaths = selectedSectionPaths.Count > 0 ? selectedSectionPaths.OrderBy(path => path).ToList() : null;
+            config.PageIds = selectedPageIds.Count > 0 ? selectedPageIds.OrderBy(id => id).ToList() : null;
+
+            if (config.ExportAll)
+            {
+                config.NotebookNames = null;
+                config.SectionPaths = null;
+                config.PageIds = null;
+            }
+        }
+
+        private static void CollectSelectedCriteria(
+            IEnumerable<OneNoteItem> items,
+            string? currentNotebook,
+            List<string> currentSectionSegments,
+            HashSet<string> selectedNotebooks,
+            HashSet<string> selectedSectionPaths,
+            HashSet<string> selectedPageIds)
+        {
+            foreach (var item in items)
+            {
+                switch (item.Type)
+                {
+                    case OneNoteItemType.Notebook:
+                    {
+                        var notebookName = item.Name;
+                        if (item.IsSelected)
+                        {
+                            selectedNotebooks.Add(notebookName);
+                        }
+
+                        CollectSelectedCriteria(item.Children, notebookName, new List<string>(), selectedNotebooks, selectedSectionPaths, selectedPageIds);
+                        break;
+                    }
+                    case OneNoteItemType.SectionGroup:
+                    {
+                        var nextSegments = new List<string>(currentSectionSegments) { item.Name };
+                        CollectSelectedCriteria(item.Children, currentNotebook, nextSegments, selectedNotebooks, selectedSectionPaths, selectedPageIds);
+                        break;
+                    }
+                    case OneNoteItemType.Section:
+                    {
+                        var nextSegments = new List<string>(currentSectionSegments) { item.Name };
+                        if (item.IsSelected && !string.IsNullOrWhiteSpace(currentNotebook))
+                        {
+                            selectedSectionPaths.Add($"{currentNotebook}/{string.Join("/", nextSegments)}");
+                        }
+
+                        CollectSelectedCriteria(item.Children, currentNotebook, nextSegments, selectedNotebooks, selectedSectionPaths, selectedPageIds);
+                        break;
+                    }
+                    case OneNoteItemType.Page:
+                    {
+                        if (item.IsSelected && !string.IsNullOrWhiteSpace(item.Id))
+                        {
+                            selectedPageIds.Add(item.Id);
+                        }
+
+                        CollectSelectedCriteria(item.Children, currentNotebook, currentSectionSegments, selectedNotebooks, selectedSectionPaths, selectedPageIds);
+                        break;
+                    }
+                }
+            }
+        }
+
+        private static void ApplyConfigSelectionToTree(List<OneNoteItem> items, ExportConfigFile config)
+        {
+            SetSelectionRecursive(items, false);
+
+            if (config.ExportAll)
+            {
+                foreach (var notebook in items.Where(item => item.Type == OneNoteItemType.Notebook))
+                {
+                    notebook.IsSelected = true;
+                }
+
+                return;
+            }
+
+            var selectedNotebooks = new HashSet<string>(config.NotebookNames ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
+            var selectedSections = new HashSet<string>(config.SectionPaths ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
+            var selectedPages = new HashSet<string>(config.PageIds ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
+
+            ApplySelectionCriteria(items, null, new List<string>(), selectedNotebooks, selectedSections, selectedPages);
+        }
+
+        private static void ApplySelectionCriteria(
+            IEnumerable<OneNoteItem> items,
+            string? currentNotebook,
+            List<string> currentSectionSegments,
+            HashSet<string> selectedNotebooks,
+            HashSet<string> selectedSections,
+            HashSet<string> selectedPages)
+        {
+            foreach (var item in items)
+            {
+                switch (item.Type)
+                {
+                    case OneNoteItemType.Notebook:
+                    {
+                        var notebookName = item.Name;
+                        item.IsSelected = selectedNotebooks.Contains(notebookName);
+                        ApplySelectionCriteria(item.Children, notebookName, new List<string>(), selectedNotebooks, selectedSections, selectedPages);
+                        break;
+                    }
+                    case OneNoteItemType.SectionGroup:
+                    {
+                        var nextSegments = new List<string>(currentSectionSegments) { item.Name };
+                        ApplySelectionCriteria(item.Children, currentNotebook, nextSegments, selectedNotebooks, selectedSections, selectedPages);
+                        break;
+                    }
+                    case OneNoteItemType.Section:
+                    {
+                        var nextSegments = new List<string>(currentSectionSegments) { item.Name };
+                        if (!string.IsNullOrWhiteSpace(currentNotebook))
+                        {
+                            var sectionPath = $"{currentNotebook}/{string.Join("/", nextSegments)}";
+                            item.IsSelected = selectedSections.Contains(sectionPath);
+                        }
+
+                        ApplySelectionCriteria(item.Children, currentNotebook, nextSegments, selectedNotebooks, selectedSections, selectedPages);
+                        break;
+                    }
+                    case OneNoteItemType.Page:
+                    {
+                        item.IsSelected = !string.IsNullOrWhiteSpace(item.Id) && selectedPages.Contains(item.Id);
+                        ApplySelectionCriteria(item.Children, currentNotebook, currentSectionSegments, selectedNotebooks, selectedSections, selectedPages);
+                        break;
+                    }
+                }
+            }
+        }
+
+        private static void SetSelectionRecursive(IEnumerable<OneNoteItem> items, bool selected)
+        {
+            foreach (var item in items)
+            {
+                item.IsSelected = selected;
+                SetSelectionRecursive(item.Children, selected);
+            }
+        }
+
+        private void SaveConfigButton_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                var options = BuildExportOptionsFromForm();
+                options.Validate();
+                SaveExportConfigFromForm();
+                Log($"Saved export config to: {ExportConfigFileService.GetDefaultConfigPath()}");
+                System.Windows.MessageBox.Show("Configuration saved.", "Save Config", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            catch (Exception ex)
+            {
+                Log($"Could not save export config: {ex.Message}");
+                System.Windows.MessageBox.Show(ex.Message, "Save Config", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
         }
 
         private void StopButton_Click(object sender, RoutedEventArgs e)

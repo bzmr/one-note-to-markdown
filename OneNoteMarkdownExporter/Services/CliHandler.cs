@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.CommandLine;
+using System.CommandLine.Parsing;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -40,7 +41,7 @@ namespace OneNoteMarkdownExporter.Services
                 "--all", "--notebook", "--section", "--page", "--output", "-o",
                 "--assets-folder", "--asset-organization", "--overwrite", "--no-lint", "--lint-config",
                 "--no-preserve-dates", "--date-metadata", "--list", "--dry-run", "--verbose", "-v", "--quiet", "-q",
-                "--help", "-h", "-?", "--version"
+                "--help", "-h", "-?", "--version", "--config"
             };
 
             return args.Any(arg => cliFlags.Any(flag => 
@@ -82,6 +83,11 @@ namespace OneNoteMarkdownExporter.Services
             {
                 Description = "Output directory for exported files",
                 DefaultValueFactory = _ => ExportOptions.GetDefaultOutputPath()
+            };
+
+            var configOption = new Option<string?>("--config")
+            {
+                Description = "Path to JSON export config file"
             };
 
             var assetsFolderOption = new Option<string?>("--assets-folder")
@@ -147,6 +153,7 @@ namespace OneNoteMarkdownExporter.Services
             rootCommand.Options.Add(sectionOption);
             rootCommand.Options.Add(pageOption);
             rootCommand.Options.Add(outputOption);
+            rootCommand.Options.Add(configOption);
             rootCommand.Options.Add(assetsFolderOption);
             rootCommand.Options.Add(assetOrganizationOption);
             rootCommand.Options.Add(overwriteOption);
@@ -161,6 +168,9 @@ namespace OneNoteMarkdownExporter.Services
 
             rootCommand.SetAction(async (result, cancellationToken) =>
             {
+                var configPath = result.GetValue(configOption);
+                var hasConfigOption = result.GetResult(configOption)?.Tokens.Count > 0;
+
                 var assetOrganizationValue = result.GetValue(assetOrganizationOption);
                 if (!TryParseAssetOrganizationMode(assetOrganizationValue, out var assetOrganizationMode))
                 {
@@ -175,31 +185,53 @@ namespace OneNoteMarkdownExporter.Services
                     return 1;
                 }
 
-                var options = new ExportOptions
+                ExportConfigFile? loadedConfig = null;
+                if (hasConfigOption)
                 {
-                    ExportAll = result.GetValue(allOption),
-                    NotebookNames = result.GetValue(notebookOption)?.ToList(),
-                    SectionPaths = result.GetValue(sectionOption)?.ToList(),
-                    PageIds = result.GetValue(pageOption)?.ToList(),
-                    OutputPath = result.GetValue(outputOption) ?? ExportOptions.GetDefaultOutputPath(),
-                    AssetsFolderPath = result.GetValue(assetsFolderOption),
-                    AssetOrganizationMode = assetOrganizationMode,
-                    Overwrite = result.GetValue(overwriteOption),
-                    ApplyLinting = !result.GetValue(noLintOption),
-                    LintConfigPath = result.GetValue(lintConfigOption),
-                    PreserveDates = !result.GetValue(noPreserveDatesOption),
-                    DateMetadataMode = dateMetadataMode,
-                    DryRun = result.GetValue(dryRunOption),
-                    Verbose = result.GetValue(verboseOption),
-                    Quiet = result.GetValue(quietOption)
+                    if (!ExportConfigFileService.TryLoad(configPath, out loadedConfig, out var loadError))
+                    {
+                        Console.Error.WriteLine($"Error: {loadError}");
+                        return 1;
+                    }
+                }
+
+                var options = loadedConfig?.ToExportOptions() ?? new ExportOptions
+                {
+                    OutputPath = ExportOptions.GetDefaultOutputPath()
                 };
 
-                var listMode = result.GetValue(listOption);
+                if (IsOptionExplicit(result, allOption)) options.ExportAll = result.GetValue(allOption);
+                if (IsOptionExplicit(result, notebookOption)) options.NotebookNames = result.GetValue(notebookOption)?.ToList();
+                if (IsOptionExplicit(result, sectionOption)) options.SectionPaths = result.GetValue(sectionOption)?.ToList();
+                if (IsOptionExplicit(result, pageOption)) options.PageIds = result.GetValue(pageOption)?.ToList();
+                if (IsOptionExplicit(result, outputOption)) options.OutputPath = result.GetValue(outputOption) ?? ExportOptions.GetDefaultOutputPath();
+                if (IsOptionExplicit(result, assetsFolderOption)) options.AssetsFolderPath = result.GetValue(assetsFolderOption);
+                if (IsOptionExplicit(result, assetOrganizationOption)) options.AssetOrganizationMode = assetOrganizationMode;
+                if (IsOptionExplicit(result, overwriteOption)) options.Overwrite = result.GetValue(overwriteOption);
+                if (IsOptionExplicit(result, noLintOption)) options.ApplyLinting = !result.GetValue(noLintOption);
+                if (IsOptionExplicit(result, lintConfigOption)) options.LintConfigPath = result.GetValue(lintConfigOption);
+                if (IsOptionExplicit(result, noPreserveDatesOption)) options.PreserveDates = !result.GetValue(noPreserveDatesOption);
+                if (IsOptionExplicit(result, dateMetadataOption)) options.DateMetadataMode = dateMetadataMode;
+                if (IsOptionExplicit(result, dryRunOption)) options.DryRun = result.GetValue(dryRunOption);
+                if (IsOptionExplicit(result, verboseOption)) options.Verbose = result.GetValue(verboseOption);
+                if (IsOptionExplicit(result, quietOption)) options.Quiet = result.GetValue(quietOption);
+
+                var listMode = loadedConfig?.ListMode == true;
+                if (IsOptionExplicit(result, listOption))
+                {
+                    listMode = result.GetValue(listOption);
+                }
 
                 return await ExecuteAsync(options, listMode, cancellationToken);
             });
 
             return rootCommand;
+        }
+
+        private static bool IsOptionExplicit(ParseResult parseResult, Option option)
+        {
+            var optionResult = parseResult.GetResult(option);
+            return optionResult != null && !optionResult.Implicit;
         }
 
         private static async Task<int> ExecuteAsync(ExportOptions options, bool listMode, CancellationToken cancellationToken)

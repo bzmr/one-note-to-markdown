@@ -6,7 +6,7 @@
         xmlns:local="clr-namespace:OneNoteMarkdownExporter"
         xmlns:models="clr-namespace:OneNoteMarkdownExporter.Models"
         mc:Ignorable="d"
-        Title="OneNote to Markdown Exporter" Height="600" Width="900" WindowState="Maximized">
+        Title="OneNote to Markdown Exporter" Height="800" Width="1080" WindowState="Normal">
     <Grid Margin="10">
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="300"/>
@@ -19,7 +19,14 @@
         </Grid.RowDefinitions>
 
         <!-- Left Column: Notebook Tree -->
-        <TextBlock Text="Select Notebooks/Sections to Export:" FontWeight="Bold" Margin="0,0,0,5"/>
+        <StackPanel>
+            <TextBlock Text="Select Notebooks/Sections to Export:" FontWeight="Bold" Margin="0,0,0,5"/>
+            <CheckBox x:Name="SelectAllNotebooksBox"
+                      Content="Select all notebooks"
+                      Margin="0,0,0,8"
+                      Checked="SelectAllNotebooksBox_Checked"
+                      Unchecked="SelectAllNotebooksBox_Unchecked"/>
+        </StackPanel>
         <TreeView x:Name="NotebookTree" Grid.Row="1" Margin="0,0,10,0">
             <TreeView.ItemTemplate>
                 <HierarchicalDataTemplate DataType="{x:Type models:OneNoteItem}" ItemsSource="{Binding Children}">
@@ -81,6 +88,7 @@
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
 
                             <StackPanel Grid.Row="0" Grid.Column="0" Margin="0,0,16,8">
@@ -103,6 +111,13 @@
                             <StackPanel Grid.Row="1" Grid.Column="1">
                                 <CheckBox x:Name="YamlMetadataBox" Content="Add YAML front matter metadata" IsChecked="False" FontWeight="Normal" Margin="0,0,0,2"/>
                                 <TextBlock Text="Adds created and updated dates to the top of each Markdown file." TextWrapping="Wrap" Foreground="#666666" FontSize="11" Margin="22,0,0,0"/>
+                            </StackPanel>
+
+                            <StackPanel Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="2" Margin="0,8,0,0">
+                                <Button x:Name="SaveConfigButton" Content="Save Config" Click="SaveConfigButton_Click"
+                                        HorizontalAlignment="Left" Padding="10,3" FontSize="11"/>
+                                <TextBlock Text="Saves current export options and selected notebooks/sections/pages to the shared JSON config used by GUI and CLI."
+                                           TextWrapping="Wrap" Foreground="#666666" FontSize="11" Margin="0,4,0,0"/>
                             </StackPanel>
                         </Grid>
                     </GroupBox>
