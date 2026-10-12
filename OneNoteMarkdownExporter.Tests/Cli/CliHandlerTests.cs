@@ -369,6 +369,89 @@ public class CliHandlerTests
 
     #endregion
 
+    #region Config Selection Override Tests
+
+    [Fact]
+    public void ApplySelectionOverridesFromCli_ConfigExportAllAndNotebookExplicit_UsesOnlyNotebookSelection()
+    {
+        var options = new ExportOptions
+        {
+            ExportAll = true,
+            NotebookNames = new List<string> { "OldNotebook" },
+            SectionPaths = new List<string> { "OldNotebook/OldSection" },
+            PageIds = new List<string> { "old-page-id" }
+        };
+
+        CliHandler.ApplySelectionOverridesFromCli(
+            options,
+            isAllExplicit: false,
+            allValue: false,
+            isNotebookExplicit: true,
+            notebookNames: new List<string> { "Data" },
+            isSectionExplicit: false,
+            sectionPaths: null,
+            isPageExplicit: false,
+            pageIds: null);
+
+        options.ExportAll.Should().BeFalse();
+        options.NotebookNames.Should().BeEquivalentTo(new[] { "Data" });
+        options.SectionPaths.Should().BeNull();
+        options.PageIds.Should().BeNull();
+    }
+
+    [Fact]
+    public void ApplySelectionOverridesFromCli_ConfigSelectionAndPageExplicit_UsesOnlyPageSelection()
+    {
+        var options = new ExportOptions
+        {
+            ExportAll = true,
+            NotebookNames = new List<string> { "Work" },
+            SectionPaths = new List<string> { "Work/Meetings" }
+        };
+
+        CliHandler.ApplySelectionOverridesFromCli(
+            options,
+            isAllExplicit: false,
+            allValue: false,
+            isNotebookExplicit: false,
+            notebookNames: null,
+            isSectionExplicit: false,
+            sectionPaths: null,
+            isPageExplicit: true,
+            pageIds: new List<string> { "page-123" });
+
+        options.ExportAll.Should().BeFalse();
+        options.NotebookNames.Should().BeNull();
+        options.SectionPaths.Should().BeNull();
+        options.PageIds.Should().BeEquivalentTo(new[] { "page-123" });
+    }
+
+    [Fact]
+    public void ApplySelectionOverridesFromCli_NoExplicitSelection_KeepsConfigSelectionUnchanged()
+    {
+        var options = new ExportOptions
+        {
+            ExportAll = true,
+            NotebookNames = new List<string> { "ConfigNotebook" }
+        };
+
+        CliHandler.ApplySelectionOverridesFromCli(
+            options,
+            isAllExplicit: false,
+            allValue: false,
+            isNotebookExplicit: false,
+            notebookNames: null,
+            isSectionExplicit: false,
+            sectionPaths: null,
+            isPageExplicit: false,
+            pageIds: null);
+
+        options.ExportAll.Should().BeTrue();
+        options.NotebookNames.Should().BeEquivalentTo(new[] { "ConfigNotebook" });
+    }
+
+    #endregion
+
     #region Case Sensitivity Tests
 
     [Fact]

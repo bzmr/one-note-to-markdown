@@ -436,11 +436,12 @@ OneNoteMarkdownExporter/
   - `--config` without path argument uses default location: `%LOCALAPPDATA%/OneNoteMarkdownExporter/export-config.json`
   - `--config /path/to/config.json` loads from specified path
   - Explicit CLI arguments override config file values
+  - Selection flags (`--all`, `--notebook`, `--section`, `--page`) are replace-style overrides: if any are provided, config selection criteria are cleared first, then explicit CLI selection is applied
   - Proper boolean flag detection prevents `--all` from being ignored after config merge
 - **Flow**:
   1. Parse arguments
   2. Load config file if `--config` specified (or use defaults)
-  3. Override config with explicit CLI arguments
+  3. Apply explicit CLI overrides (selection flags replace config selection state; other explicit flags override per option)
   4. Build `ExportOptions` from merged values
   5. Validate selection and options
   6. List mode: Print hierarchy and exit

@@ -1597,7 +1597,11 @@ namespace OneNoteMarkdownExporter.Services
 
             if (!options.Quiet)
             {
-                Report(progress, ExportProgressKind.PageStarted, $"Exporting: {page.Name}", result, page, finalMdPath);
+                var pageStartedMessage = AppendNotebookSectionContext(
+                    $"Exporting: {page.Name}",
+                    notebookName,
+                    sectionPath);
+                Report(progress, ExportProgressKind.PageStarted, pageStartedMessage, result, page, finalMdPath);
             }
 
             ExecuteOutputWriteWithRetry(
@@ -1754,21 +1758,30 @@ namespace OneNoteMarkdownExporter.Services
                             markdown = lintResult.Content;
                             if (!string.IsNullOrWhiteSpace(lintResult.WarningMessage))
                             {
-                                var warning = $"Warning: Markdown linting completed with unresolved issues for '{page.Name}': {lintResult.WarningMessage}";
+                                var warning = AppendNotebookSectionContext(
+                                    $"Warning: Markdown linting completed with unresolved issues for '{page.Name}': {lintResult.WarningMessage}",
+                                    notebookName,
+                                    sectionPath);
                                 result.Warnings.Add(warning);
                                 Report(progress, ExportProgressKind.Warning, warning, result, page, finalMdPath);
                             }
                         }
                         else
                         {
-                            var warning = $"Warning: Markdown linting failed for '{page.Name}': {lintResult.ErrorMessage}";
+                            var warning = AppendNotebookSectionContext(
+                                $"Warning: Markdown linting failed for '{page.Name}': {lintResult.ErrorMessage}",
+                                notebookName,
+                                sectionPath);
                             result.Warnings.Add(warning);
                             Report(progress, ExportProgressKind.Warning, warning, result, page, finalMdPath);
                         }
                     }
                     catch (Exception lintEx)
                     {
-                        var warning = $"Warning: Markdown linting failed for '{page.Name}': {lintEx.Message}";
+                        var warning = AppendNotebookSectionContext(
+                            $"Warning: Markdown linting failed for '{page.Name}': {lintEx.Message}",
+                            notebookName,
+                            sectionPath);
                         result.Warnings.Add(warning);
                         Report(progress, ExportProgressKind.Warning, warning, result, page, finalMdPath);
                     }
@@ -1783,9 +1796,13 @@ namespace OneNoteMarkdownExporter.Services
                     $"writing Markdown page '{finalMdPath}'");
                 stageStopwatch.Stop();
                 writeElapsed = stageStopwatch.Elapsed;
-                ApplyPageTimestamps(finalMdPath, page, options, result, progress);
+                ApplyPageTimestamps(finalMdPath, page, options, result, progress, notebookName, sectionPath);
                 result.ExportedPages++;
-                Report(progress, ExportProgressKind.PageExported, $"  Exported successfully: {page.Name}", result, page, finalMdPath);
+                var pageExportedMessage = AppendNotebookSectionContext(
+                    $"  Exported successfully: {page.Name}",
+                    notebookName,
+                    sectionPath);
+                Report(progress, ExportProgressKind.PageExported, pageExportedMessage, result, page, finalMdPath);
 
                 pageStopwatch.Stop();
                 if (pageStopwatch.Elapsed >= TimeSpan.FromSeconds(5))
@@ -1815,10 +1832,12 @@ namespace OneNoteMarkdownExporter.Services
             }
             catch (StorageWriteException ex)
             {
-                var infrastructureMessage =
+                var infrastructureMessage = AppendNotebookSectionContext(
                     $"Storage/network infrastructure failure while exporting '{page.Name}'. " +
                     $"The export run is being stopped to avoid creating many incomplete pages. " +
-                    $"Already completed pages remain valid. Details: {ex.Message}";
+                    $"Already completed pages remain valid. Details: {ex.Message}",
+                    notebookName,
+                    sectionPath);
                 result.Warnings.Add(infrastructureMessage);
                 Report(
                     progress,
@@ -1834,7 +1853,11 @@ namespace OneNoteMarkdownExporter.Services
                 result.FailedPages++;
                 var failureDetails = ExportFailureFormatter.FormatPageFailure(page, finalMdPath, ex);
                 result.Failures.Add(failureDetails);
-                Report(progress, ExportProgressKind.PageFailed, $"  Error exporting '{page.Name}': {ex.Message}", result, page, finalMdPath, failureDetails);
+                var errorMessage = AppendNotebookSectionContext(
+                    $"  Error exporting '{page.Name}': {ex.Message}",
+                    notebookName,
+                    sectionPath);
+                Report(progress, ExportProgressKind.PageFailed, errorMessage, result, page, finalMdPath, failureDetails);
             }
         }
 
@@ -1916,7 +1939,9 @@ namespace OneNoteMarkdownExporter.Services
             OneNoteItem page,
             ExportOptions options,
             ExportResult result,
-            IProgress<ExportProgressUpdate>? progress)
+            IProgress<ExportProgressUpdate>? progress,
+            string? notebookName,
+            string? sectionPath)
         {
             if (!options.PreserveDates || (!page.CreatedTime.HasValue && !page.LastModifiedTime.HasValue))
             {
@@ -1929,10 +1954,35 @@ namespace OneNoteMarkdownExporter.Services
             }
             catch (Exception ex)
             {
-                var warning = $"Warning: Could not preserve dates for '{page.Name}': {ex.Message}";
+                var warning = AppendNotebookSectionContext(
+                    $"Warning: Could not preserve dates for '{page.Name}': {ex.Message}",
+                    notebookName,
+                    sectionPath);
                 result.Warnings.Add(warning);
                 Report(progress, ExportProgressKind.Warning, warning, result, page, markdownFilePath);
             }
+        }
+
+        private static string AppendNotebookSectionContext(
+            string message,
+            string? notebookName,
+            string? sectionPath)
+        {
+            var contextParts = new List<string>(2);
+
+            if (!string.IsNullOrWhiteSpace(notebookName))
+            {
+                contextParts.Add($"Notebook='{notebookName}'");
+            }
+
+            if (!string.IsNullOrWhiteSpace(sectionPath))
+            {
+                contextParts.Add($"Section='{sectionPath}'");
+            }
+
+            return contextParts.Count == 0
+                ? message
+                : $"{message} ({string.Join("; ", contextParts)})";
         }
 
         private static void Report(

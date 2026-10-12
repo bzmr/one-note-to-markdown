@@ -130,11 +130,13 @@ OneNoteMarkdownExporter.exe --help
 
 | Option | Description |
 |--------|-------------|
+| `--config [path]` | Load options from export config JSON. If path is omitted, uses `%LOCALAPPDATA%\OneNoteMarkdownExporter\export-config.json` |
 | `--list` | List all notebooks, sections, and pages (no export) |
 | `--dry-run` | Preview what would be exported without creating files |
 | `--verbose`, `-v` | Show detailed output including file paths |
 | `--quiet`, `-q` | Show only errors (suppress progress messages) |
-| `--help`, `-h` | Show help and usage information |
+| `--help`, `-h`, `-?` | Show help and usage information |
+| `--version` | Show application version |
 
 ### CLI Examples
 
@@ -177,6 +179,12 @@ OneNoteMarkdownExporter.exe --all --asset-organization notebook
 
 # Export notes with page-local asset folders
 OneNoteMarkdownExporter.exe --all --asset-organization page
+
+# Load config from default location
+OneNoteMarkdownExporter.exe --config --all
+
+# Load config from a custom file path
+OneNoteMarkdownExporter.exe --config "D:\Backups\one-note-export-config.json" --all
 ```
 
 ### Assets Folder
@@ -293,7 +301,7 @@ Only JSON rule configuration is supported. YAML, TOML, JavaScript configuration,
 | **MD036** | Emphasis instead of heading | Style choice |
 | **MD049** | Consistent emphasis style | Mixed styles in source content |
 | **MD059** | Link text should be descriptive | The exporter preserves the user's wording instead of judging prose |
-
+| **MD060** | Table style aligned | OneNote tables do not force alignment
 ## Technical Details
 
 ### How It Works

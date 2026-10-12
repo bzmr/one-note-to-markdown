@@ -208,10 +208,21 @@ namespace OneNoteMarkdownExporter.Services
                     OutputPath = ExportOptions.GetDefaultOutputPath()
                 };
 
-                if (IsOptionExplicit(result, allOption)) options.ExportAll = result.GetValue(allOption);
-                if (IsOptionExplicit(result, notebookOption)) options.NotebookNames = result.GetValue(notebookOption)?.ToList();
-                if (IsOptionExplicit(result, sectionOption)) options.SectionPaths = result.GetValue(sectionOption)?.ToList();
-                if (IsOptionExplicit(result, pageOption)) options.PageIds = result.GetValue(pageOption)?.ToList();
+                var isAllExplicit = IsOptionExplicit(result, allOption);
+                var isNotebookExplicit = IsOptionExplicit(result, notebookOption);
+                var isSectionExplicit = IsOptionExplicit(result, sectionOption);
+                var isPageExplicit = IsOptionExplicit(result, pageOption);
+
+                ApplySelectionOverridesFromCli(
+                    options,
+                    isAllExplicit,
+                    result.GetValue(allOption),
+                    isNotebookExplicit,
+                    result.GetValue(notebookOption)?.ToList(),
+                    isSectionExplicit,
+                    result.GetValue(sectionOption)?.ToList(),
+                    isPageExplicit,
+                    result.GetValue(pageOption)?.ToList());
                 if (IsOptionExplicit(result, outputOption)) options.OutputPath = result.GetValue(outputOption) ?? ExportOptions.GetDefaultOutputPath();
                 if (IsOptionExplicit(result, assetsFolderOption)) options.AssetsFolderPath = result.GetValue(assetsFolderOption);
                 if (IsOptionExplicit(result, assetOrganizationOption)) options.AssetOrganizationMode = assetOrganizationMode;
@@ -240,6 +251,53 @@ namespace OneNoteMarkdownExporter.Services
         {
             var optionResult = parseResult.GetResult(option);
             return optionResult != null && !optionResult.Implicit;
+        }
+
+        public static void ApplySelectionOverridesFromCli(
+            ExportOptions options,
+            bool isAllExplicit,
+            bool allValue,
+            bool isNotebookExplicit,
+            List<string>? notebookNames,
+            bool isSectionExplicit,
+            List<string>? sectionPaths,
+            bool isPageExplicit,
+            List<string>? pageIds)
+        {
+            var hasExplicitSelectionOverride =
+                isAllExplicit ||
+                isNotebookExplicit ||
+                isSectionExplicit ||
+                isPageExplicit;
+
+            // Explicit CLI selection flags replace selection state from config.
+            if (hasExplicitSelectionOverride)
+            {
+                options.ExportAll = false;
+                options.NotebookNames = null;
+                options.SectionPaths = null;
+                options.PageIds = null;
+            }
+
+            if (isAllExplicit)
+            {
+                options.ExportAll = allValue;
+            }
+
+            if (isNotebookExplicit)
+            {
+                options.NotebookNames = notebookNames;
+            }
+
+            if (isSectionExplicit)
+            {
+                options.SectionPaths = sectionPaths;
+            }
+
+            if (isPageExplicit)
+            {
+                options.PageIds = pageIds;
+            }
         }
 
         private static async Task<int> ExecuteAsync(ExportOptions options, bool listMode, CancellationToken cancellationToken)
