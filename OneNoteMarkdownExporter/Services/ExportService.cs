@@ -769,6 +769,15 @@ namespace OneNoteMarkdownExporter.Services
                 result.Warnings.Add(warning);
                 Report(progress, ExportProgressKind.Warning, warning, result);
             }
+            else if (options.ApplyLinting)
+            {
+                var lintConfigPath = ResolveLintConfigPathForLogging(options.LintConfigPath);
+                Report(
+                    progress,
+                    ExportProgressKind.Message,
+                    $"Markdown linting enabled (markdownlint-cli2). Config: {lintConfigPath}",
+                    result);
+            }
 
             var planner = new ExportPathPlanner(options.OutputPath, options);
 
@@ -1279,6 +1288,21 @@ namespace OneNoteMarkdownExporter.Services
                     .Select(segment => segment is "." or ".."
                         ? segment
                         : Uri.EscapeDataString(segment)));
+        }
+
+        private string ResolveLintConfigPathForLogging(string? lintConfigPath)
+        {
+            if (!string.IsNullOrWhiteSpace(lintConfigPath))
+            {
+                return Path.GetFullPath(lintConfigPath);
+            }
+
+            if (_cliLinter is MarkdownLintCliService markdownLintCliService)
+            {
+                return markdownLintCliService.DefaultConfigPath;
+            }
+
+            return "(unknown linter config path)";
         }
 
         private void ListItems(List<OneNoteItem> items, IProgress<ExportProgressUpdate>? progress, ExportResult result, string indent, bool isImplicitlySelected = false)

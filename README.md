@@ -290,18 +290,19 @@ Only JSON rule configuration is supported. YAML, TOML, JavaScript configuration,
 
 | Rule | What It Does | Why It's Disabled |
 |------|--------------|-------------------|
+| **MD012** | Multiple blank lines | OneNote spacing doesn't always translate cleanly |
 | **MD013** | Line length limit (80 chars) | OneNote content doesn't follow line limits |
-| **MD033** | No inline HTML | Some exported content may have intentional HTML |
-| **MD041** | First line should be H1 | Not all notes start with a heading |
+| **MD018** | No space after hash in heading | Edge cases in conversion |
 | **MD024** | No duplicate headings | Notes often reuse section headers |
 | **MD028** | Blank line inside blockquote | Common in formatted quotes |
-| **MD012** | Multiple blank lines | OneNote spacing doesn't always translate cleanly |
-| **MD040** | Fenced code blocks need language | Not all code blocks have a language |
-| **MD018** | No space after hash in heading | Edge cases in conversion |
+| **MD033** | No inline HTML | Some exported content may have intentional HTML |
 | **MD036** | Emphasis instead of heading | Style choice |
+| **MD040** | Fenced code blocks need language | Not all code blocks have a language |
+| **MD041** | First line should be H1 | Not all notes start with a heading |
 | **MD049** | Consistent emphasis style | Mixed styles in source content |
 | **MD059** | Link text should be descriptive | The exporter preserves the user's wording instead of judging prose |
 | **MD060** | Table style aligned | OneNote tables do not force alignment
+
 ## Technical Details
 
 ### How It Works

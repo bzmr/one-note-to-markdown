@@ -20,6 +20,7 @@ namespace OneNoteMarkdownExporter.Services
 
         public bool IsAvailable => _isAvailable;
         public string UnavailableReason { get; private set; } = "";
+        public string DefaultConfigPath => _configPath;
 
         public MarkdownLintCliService(string? resourcesDirectory = null)
         {
